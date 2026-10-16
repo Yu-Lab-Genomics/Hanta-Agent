@@ -1,0 +1,132 @@
+# ============================================================
+# 汉坦病毒系统发育分析 - 统一配置文件
+# 位置: /Users/pyl/Desktop/hantavirus-pipeline/config.yaml
+# Skill 脚本读取方式: config_loader.py 从自己目录读取 scripts/config.yaml
+#                      wrapper 启动时自动从主配置同步
+# ============================================================
+
+# --- 项目根目录（数据、数据库、结果所在）---
+project_dir: /workspace/liangpeiyu/project/hantaKG_Agent
+
+# --- conda 环境 ---
+conda_env: lpy-hanta-v2
+
+# --- CPU 线程数；auto 会自动检测 nproc/getconf/sysctl ---
+threads: 96
+
+# --- 软件可执行文件；可填写绝对路径或 PATH 中的命令名 ---
+software:
+  seqkit: seqkit
+  diamond: diamond
+  mafft: mafft
+  trimal: trimal
+  iqtree3: iqtree3
+
+# --- 输入输出目录；下游脚本优先读取这里的 results_dir ---
+paths:
+  data_dir: /workspace/liangpeiyu/project/hantaKG_Agent/data_cell_submit-paper
+  results_dir: /workspace/liangpeiyu/project/hantaKG_Agent/results_cell_submit-paper
+  diamond_vmr_dir: /workspace/liangpeiyu/project/hantaKG_Agent/results_cell_submit-paper/06_diamond_vmr
+
+# --- 输入文件后缀（自动发现数据目录下的双端测序文件）---
+input:
+  r1_suffixes: "_r1.fq.gz,_R1.fq.gz,.r1.fq.gz,.R1.fq.gz,_1.fq.gz,_1.fastq.gz,_R1.fastq.gz,_r1.fastq.gz"
+  r2_suffixes: "_r2.fq.gz,_R2.fq.gz,.r2.fq.gz,.R2.fq.gz,_2.fq.gz,_2.fastq.gz,_R2.fastq.gz,_r2.fastq.gz"
+
+# --- fastp 质控参数 ---
+fastp:
+  # fastp 负责原 fastp + SOAPnuke 两步的质控和接头处理。
+  disable_adapter_trimming: false
+  detect_adapter_for_pe: true
+  cut_front: true
+  cut_tail: true
+  cut_right: true
+  cut_front_window_size: 5
+  cut_tail_window_size: 5
+  cut_right_window_size: 5
+  cut_front_mean_quality: 20
+  cut_tail_mean_quality: 20
+  cut_right_mean_quality: 20
+  qualified_quality_phred: 20
+  unqualified_percent_limit: 20
+  n_base_limit: 0
+  length_required: 50
+  extra_args:
+
+# --- PRINSEQ++ 低复杂度过滤参数 ---
+prinseq:
+  lc_entropy: 0.5
+  lc_dust: 0.5
+  extra_args:
+
+# --- bowtie2 去 rRNA 参数（替换 SortMeRNA；PDF p25 Viral Abundance Quantification）---
+bowtie2:
+  # 参考序列目录（沿用原 SortMeRNA 数据库 fasta 文件建索引）
+  ref_dir:  /workspace/liangpeiyu/project/hantaKG_Agent/DB/sortmerna
+  # 合并后建索引的参考 fasta 文件列表
+  refs: smr_v4.3_default_db.fasta,smr_v4.3_fast_db.fasta,smr_v4.3_sensitive_db_rfam_seeds.fasta,smr_v4.3_sensitive_db.fasta
+  # bowtie2 索引前缀（自动生成在 ref_dir 下）
+  index_prefix: rrna_index
+  # 比对灵敏度预设：very-fast, fast, sensitive, very-sensitive
+  preset: very-sensitive
+  extra_args:
+
+# --- MEGAHIT 组装参数；PDF p23-p24 描述为 default parameters ---
+megahit:
+  min_contig_len: 500
+  overwrite: true
+  extra_args:
+
+cleanup:
+  intermediates: true
+# --- Prodigal ORF 预测参数；同时输出 >=200 aa 蛋白 FASTA 便于后续建树 ---
+prodigal:
+  mode: meta
+  min_protein_aa: 200
+  extra_args:
+
+# --- diamond 比对参数 ---
+diamond:
+  evalue: 0.00001
+  max_target_seqs: 1
+
+# --- mafft 比对参数 ---
+mafft:
+  preset: auto
+
+# --- trimal 修剪参数 ---
+trimal:
+  method: automated1
+  out_format: fasta
+
+# --- IQ-TREE3 建树参数 ---
+iqtree3:
+  model: MFP
+  bootstrap: 1000
+  alrt: 1000
+  identity: 90        # 分类时氨基酸一致性阈值(%)，>=此值判为同种
+
+# --- 合并过滤参数 ---
+merge:
+  pident_min: 50.0
+
+# --- 系统发育分析参数 ---
+phylogeny:
+  sh_alrt_min: 80
+  mafft_preset: auto
+  iqtree_bootstrap: 1000
+  iqtree_alrt: 1000
+
+# --- VMR 合并后提取与聚类参数 ---
+vmr_merge_cluster:
+  seqkit_grep_extra_args:
+  cd_hit_est_c: 0.99
+  cd_hit_est_aS: 0.8
+  cd_hit_est_n: 10
+  cd_hit_est_g: 1
+  cd_hit_est_G: 0
+  cd_hit_est_d: 0
+  cd_hit_est_p: 1
+  cd_hit_est_M: 0
+  cd_hit_est_T:
+  cd_hit_est_extra_args:
