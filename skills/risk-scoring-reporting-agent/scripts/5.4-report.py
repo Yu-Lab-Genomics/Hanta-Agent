@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""5.4 报告生成：读取 5.3 输出的中间文件 report_inputs.json，生成 report.html。
+"""5.4 Report generation: read the report_inputs.json produced by 5.3 and render report.html.
 
-流程位置：5.3（风险打分，产出 results.tsv / species_risk.tsv / report_inputs.json）
-          → 本脚本（把打分结果渲染成自包含 HTML 报告）。
+Position: 5.3 (risk scoring → results.tsv / species_risk.tsv / report_inputs.json)
+          → this script (render the scores into a self-contained HTML report).
 
-输入：
-  - report_inputs.json（5.3 输出；含 rows / species / relations / qc_dir）
-输出：
-  - report.html（自包含 HTML：质控（fastp 超链接）→ 打分 → 判断依据（知识图谱 + 建议））
+Input:
+  - report_inputs.json (step-5.3 output; rows / species / relations / qc_dir)
+Output:
+  - report.html (self-contained HTML: QC (fastp links) → scoring → rationale (KG + recommendations))
 
-用法：
+Usage:
   python 5.4-report.py --bundle report_inputs.json
-  python 5.4-report.py --config config.yaml          # 从 results_dir/00_results/report_inputs.json 读
+  python 5.4-report.py --config config.yaml          # reads results_dir/00_results/report_inputs.json
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 
 
 def _esc(s) -> str:
-    """HTML 转义，防止数据中的特殊字符破坏页面。"""
+    """HTML-escape to prevent special characters from breaking the page."""
     return (str(s)
             .replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -35,36 +35,36 @@ def _esc(s) -> str:
 
 
 REL_CN = {
-    "virus_detected_in_host": "病毒在宿主中检出",
-    "virus_has_gene_or_segment": "病毒含基因/片段",
-    "virus_coinfects_with": "共感染",
-    "virus_related_to": "近缘病毒",
-    "virus_reassortment": "重配",
-    "virus_host_switching": "宿主转换",
-    "virus_associated_with_host": "病毒与宿主关联",
-    "variant_reported": "变异报道",
+    "virus_detected_in_host": "Virus detected in host",
+    "virus_has_gene_or_segment": "Virus has gene/segment",
+    "virus_coinfects_with": "Coinfection",
+    "virus_related_to": "Related virus",
+    "virus_reassortment": "Reassortment",
+    "virus_host_switching": "Host switching",
+    "virus_associated_with_host": "Virus associated with host",
+    "variant_reported": "Variant reported",
 }
 
 
-# ---------- 圆形柱状图（每条 L 段序列一张：内环=检出可信度3项，外环=物种风险5项） ----------
+# ---------- Circular bar chart (one per L-segment sequence: inner = 3 detection items, outer = 8 species-risk items) ----------
 CBAR_INNER = [
     ("DIAMOND", "#2166ac"),
     ("Tree", "#67a9cf"),
     ("LucaProt", "#d1e5f0"),
 ]
-# 外环 8 项：宿主(橙) + 系统发育(紫) + 文献4项(绿) + 人类感染(红)
+# Outer ring 8 items: Host (orange) + Phylogeny (purple) + 4 literature items (green) + Human infection (red)
 CBAR_OUTER = [
-    ("宿主类型", "host_type_score", 10.0, "#e08214"),
-    ("宿主广度", "host_breadth_score", 5.0, "#f4a582"),
-    ("系统发育", "phylogeny_score", 15.0, "#7570b3"),
-    ("重配", "reassortment", 10.0, "#1b7837"),
-    ("宿主转换", "host_switching", 10.0, "#5aae61"),
-    ("共感染", "coinfection", 5.0, "#a6dba0"),
-    ("近缘", "related_viruses", 5.0, "#d9f0d3"),
-    ("人类感染", "human_infection_score", 40.0, "#d73027"),
+    ("Host type", "host_type_score", 10.0, "#e08214"),
+    ("Host breadth", "host_breadth_score", 5.0, "#f4a582"),
+    ("Phylogeny", "phylogeny_score", 15.0, "#7570b3"),
+    ("Reassortment", "reassortment", 10.0, "#1b7837"),
+    ("Host switching", "host_switching", 10.0, "#5aae61"),
+    ("Coinfection", "coinfection", 5.0, "#a6dba0"),
+    ("Related", "related_viruses", 5.0, "#d9f0d3"),
+    ("Human infection", "human_infection_score", 40.0, "#d73027"),
 ]
 
-# 文献 4 性状 -> (关系类型, 是否要求 direct_target_match)，与 5.3 literature_traits 保持一致
+# 4 literature traits -> (relation type, whether direct_target_match is required), kept in sync with 5.3 literature_traits
 LIT_TRAIT = {
     "reassortment": ("virus_reassortment", False),
     "host_switching": ("virus_host_switching", False),
@@ -72,13 +72,37 @@ LIT_TRAIT = {
     "related_viruses": ("virus_related_to", True),
 }
 LIT_TRAIT_CN = {
-    "reassortment": "重配",
-    "host_switching": "宿主转换",
-    "coinfection": "共感染",
-    "related_viruses": "近缘",
+    "reassortment": "Reassortment",
+    "host_switching": "Host switching",
+    "coinfection": "Coinfection",
+    "related_viruses": "Related",
 }
 LIT_PLACEHOLDER = {"", "related virus", "co-infecting virus", "unspecified variant"}
 MISS_COLOR = "#d9d9d9"
+
+# Host annotation source (host_source field from 5.3)
+HOST_SOURCE_CN = {"VMR": "VMR annotation", "literature": "Literature search", "none": "None"}
+
+# The upstream host_desc values are a mix of a Chinese family name and a Latin
+# name. The report shows the Latin name only. These keys are match patterns, not
+# display strings, so the Chinese fragments must stay verbatim.
+# Example input: "\u9f20\u79d1 Muridae" -> "Muridae".
+HOST_DESC_EN = {
+    "鼠科 Muridae": "Muridae",
+    "鼩鼱科 Soricidae": "Soricidae",
+    "仓鼠科 Cricetidae": "Cricetidae",
+    "蝙蝠科 Vespertilionidae": "Vespertilionidae",
+    "菊头蝠科 Rhinolophidae": "Rhinolophidae",
+    "刺猬科 Erinaceidae": "Erinaceidae",
+    "鸟类": "Bird",
+    "昆虫": "Insect",
+}
+
+
+def _en_host(desc) -> str:
+    d = str(desc or "").strip()
+    return HOST_DESC_EN.get(d, d)
+
 
 _cbar_uid = 0
 
@@ -93,7 +117,7 @@ def _num(v, default=0.0):
 
 
 def _lit_evidence(sp: str, rels_by_sp: dict) -> dict:
-    """某物种文献 4 性状各自的支撑关系（PMID + 证据句）。"""
+    """Supporting relations (PMID + evidence sentence) for the 4 literature traits of one species."""
     out = {t: [] for t in LIT_TRAIT}
     for rel in rels_by_sp.get(sp, []):
         relt = rel.get("relation")
@@ -111,102 +135,102 @@ def _lit_evidence(sp: str, rels_by_sp: dict) -> dict:
 
 
 def _lit_subscore(sr: dict, trait: str, maxv: float) -> float:
-    """文献性状得分：命中=满分，未命中=0。"""
+    """Literature trait score: full mark if hit, 0 otherwise."""
     detail = sr.get("literature_detail") or {}
     return maxv if detail.get(trait) is True else 0.0
 
 
 def _hover_builder(o: dict, sr: dict, lit_ev: dict, full: dict) -> dict:
-    """为每根柱生成悬停 HTML 字符串（含原始比对/树/宿主/文献依据）。"""
+    """Generate hover HTML for each bar (raw alignment / tree / host / literature evidence)."""
     def kv(label, v, suffix=""):
         s = str(v or "").strip()
-        return f"{label}：{_esc(s)}{suffix}" if s else None
+        return f"{label}: {_esc(s)}{suffix}" if s else None
 
     def pct(score, maxv):
         return round(min(1.0, max(0.0, score / maxv)) * 100, 1) if maxv else 0.0
 
     h = {}
 
-    # ---- 内环（检出可信度）----
+    # ---- Inner ring (detection confidence) ----
     d = _num(o.get("detection_diamond"))
-    dlines = [f"得分：{d} / 1（占比 {pct(d, 1)}%）"]
-    for ln in [kv("参考序列", full.get("sseqid")),
-               kv("一致率 pident", full.get("pident"), "%"),
-               kv("比对长度", full.get("length"), " bp"),
+    dlines = [f"Score: {d} / 1 ({pct(d, 1)}%)"]
+    for ln in [kv("Reference", full.get("sseqid")),
+               kv("Identity (pident)", full.get("pident"), "%"),
+               kv("Alignment length", full.get("length"), " bp"),
                kv("evalue", full.get("evalue")),
                kv("bitscore", full.get("bitscore"))]:
         if ln:
             dlines.append(ln)
     if full.get("qstart") and full.get("qend"):
-        dlines.append(f"query 位置：{full.get('qstart')}-{full.get('qend')}")
+        dlines.append(f"Query position: {full.get('qstart')}-{full.get('qend')}")
     if full.get("sstart") and full.get("send"):
-        dlines.append(f"参考位置：{full.get('sstart')}-{full.get('send')}")
+        dlines.append(f"Reference position: {full.get('sstart')}-{full.get('send')}")
     h["DIAMOND"] = "<br/>".join(dlines)
 
     t = _num(o.get("detection_tree"))
-    tlines = [f"得分：{t} / 1（占比 {pct(t, 1)}%）"]
-    for ln in [kv("树位置", full.get("tree_position")),
+    tlines = [f"Score: {t} / 1 ({pct(t, 1)}%)"]
+    for ln in [kv("Tree position", full.get("tree_position")),
                kv("bootstrap", full.get("tree_bootstrap")),
-               kv("最近邻", full.get("tree_nn_sseqid")),
-               kv("距离", full.get("tree_nn_distance"))]:
+               kv("Nearest neighbour", full.get("tree_nn_sseqid")),
+               kv("Distance", full.get("tree_nn_distance"))]:
         if ln:
             tlines.append(ln)
     h["Tree"] = "<br/>".join(tlines)
 
     l = _num(o.get("detection_lucaprot"))
-    h["LucaProt"] = f"得分：{l} / 1（RdRp 概率，占比 {pct(l, 1)}%）"
+    h["LucaProt"] = f"Score: {l} / 1 (RdRp probability, {pct(l, 1)}%)"
 
-    # ---- 外环（物种风险分）----
+    # ---- Outer ring (species risk) ----
     ht = _num(sr.get("host_type_score"))
-    hlines = [f"得分：{ht} / 10（占比 {pct(ht, 10)}%）"]
-    for ln in [kv("宿主", full.get("host")), kv("分类", sr.get("host_class"))]:
+    hlines = [f"Score: {ht} / 10 ({pct(ht, 10)}%)"]
+    for ln in [kv("Host", full.get("host")), kv("Class", sr.get("host_class"))]:
         if ln:
             hlines.append(ln)
-    h["宿主类型"] = "<br/>".join(hlines)
+    h["Host type"] = "<br/>".join(hlines)
 
     br = sr.get("host_breadth") or 0
-    h["宿主广度"] = f"得分：{br} / 5（占比 {pct(br, 5)}%）<br/>宿主种数：{br}"
+    h["Host breadth"] = f"Score: {br} / 5 ({pct(br, 5)}%)<br/>Host species count: {br}"
 
     phy = _num(sr.get("phylogeny_score"))
-    plines = [f"得分：{phy} / 15（占比 {pct(phy, 15)}%）"]
-    for ln in [kv("属", full.get("genus")), kv("最近邻距离", full.get("tree_nn_distance"))]:
+    plines = [f"Score: {phy} / 15 ({pct(phy, 15)}%)"]
+    for ln in [kv("Genus", full.get("genus")), kv("Nearest-neighbour distance", full.get("tree_nn_distance"))]:
         if ln:
             plines.append(ln)
-    h["系统发育"] = "<br/>".join(plines)
+    h["Phylogeny"] = "<br/>".join(plines)
 
-    for trait, cn, maxv in [("reassortment", "重配", 10), ("host_switching", "宿主转换", 10),
-                            ("coinfection", "共感染", 5), ("related_viruses", "近缘", 5)]:
+    for trait, cn, maxv in [("reassortment", "Reassortment", 10), ("host_switching", "Host switching", 10),
+                            ("coinfection", "Coinfection", 5), ("related_viruses", "Related", 5)]:
         hit = bool((sr.get("literature_detail") or {}).get(trait))
         if not hit:
-            h[cn] = f"未命中：0 / {maxv}"
+            h[cn] = f"Not detected: 0 / {maxv}"
             continue
         rels = lit_ev.get(trait) or []
         pmids = list(dict.fromkeys(str(r.get("pmid")) for r in rels if r.get("pmid")))[:3]
         sents = [str(r.get("evidence_sentence") or "").strip()
                  for r in rels if r.get("evidence_sentence")]
-        lines = [f"得分：{maxv} / {maxv}（占比 100%）"]
+        lines = [f"Score: {maxv} / {maxv} (100%)"]
         if pmids:
-            lines.append("来源 PMID：" + "、".join(_esc(p) for p in pmids))
+            lines.append("Source PMID: " + ", ".join(_esc(p) for p in pmids))
         if sents:
-            lines.append("证据句：" + _esc(sents[0][:120]))
+            lines.append("Evidence sentence: " + _esc(sents[0][:120]))
         h[cn] = "<br/>".join(lines)
 
     if sr.get("human_infection_vmr"):
-        h["人类感染"] = "得分：40 / 40（占比 100%）<br/>来源：VMR 官方人类分离株"
+        h["Human infection"] = "Score: 40 / 40 (100%)<br/>Source: VMR official human isolate"
     elif sr.get("human_infection_literature"):
         hpm = [str(p) for p in (sr.get("human_pmids") or [])]
-        lines = ["得分：40 / 40（占比 100%）"]
+        lines = ["Score: 40 / 40 (100%)"]
         if hpm:
-            lines.append("来源 PMID：" + "、".join(_esc(p) for p in hpm))
-        h["人类感染"] = "<br/>".join(lines)
+            lines.append("Source PMID: " + ", ".join(_esc(p) for p in hpm))
+        h["Human infection"] = "<br/>".join(lines)
     else:
-        h["人类感染"] = "未命中：0 / 40"
+        h["Human infection"] = "Not detected: 0 / 40"
 
     return h
 
 
 def _cbar_option(o: dict, sr: dict, lit_ev: dict, full: dict) -> dict:
-    """单条序列的双层圆形柱状图 ECharts option（内环=检出3项，外环=物种风险8项）。"""
+    """ECharts option for the two-layer circular bar chart of one sequence (inner = 3 detection items, outer = 8 species-risk items)."""
     hover = _hover_builder(o, sr, lit_ev, full)
     inner = [
         ("DIAMOND", _num(o.get("detection_diamond")), 1.0, "#2166ac", None),
@@ -214,14 +238,14 @@ def _cbar_option(o: dict, sr: dict, lit_ev: dict, full: dict) -> dict:
         ("LucaProt", _num(o.get("detection_lucaprot")), 1.0, "#d1e5f0", None),
     ]
     outer_raw = [
-        ("宿主类型", _num(sr.get("host_type_score")), 10.0, "#e08214", None),
-        ("宿主广度", _num(sr.get("host_breadth_score")), 5.0, "#f4a582", None),
-        ("系统发育", _num(sr.get("phylogeny_score")), 15.0, "#7570b3", None),
-        ("重配", _lit_subscore(sr, "reassortment", 10.0), 10.0, "#1b7837", "reassortment"),
-        ("宿主转换", _lit_subscore(sr, "host_switching", 10.0), 10.0, "#5aae61", "host_switching"),
-        ("共感染", _lit_subscore(sr, "coinfection", 5.0), 5.0, "#a6dba0", "coinfection"),
-        ("近缘", _lit_subscore(sr, "related_viruses", 5.0), 5.0, "#d9f0d3", "related_viruses"),
-        ("人类感染", _num(sr.get("human_infection_score")), 40.0, "#d73027", "human"),
+        ("Host type", _num(sr.get("host_type_score")), 10.0, "#e08214", None),
+        ("Host breadth", _num(sr.get("host_breadth_score")), 5.0, "#f4a582", None),
+        ("Phylogeny", _num(sr.get("phylogeny_score")), 15.0, "#7570b3", None),
+        ("Reassortment", _lit_subscore(sr, "reassortment", 10.0), 10.0, "#1b7837", "reassortment"),
+        ("Host switching", _lit_subscore(sr, "host_switching", 10.0), 10.0, "#5aae61", "host_switching"),
+        ("Coinfection", _lit_subscore(sr, "coinfection", 5.0), 5.0, "#a6dba0", "coinfection"),
+        ("Related", _lit_subscore(sr, "related_viruses", 5.0), 5.0, "#d9f0d3", "related_viruses"),
+        ("Human infection", _num(sr.get("human_infection_score")), 40.0, "#d73027", "human"),
     ]
 
     def ring(items):
@@ -275,7 +299,7 @@ def _cbar_option(o: dict, sr: dict, lit_ev: dict, full: dict) -> dict:
 
 
 def _cbar_html(o: dict, sr: dict, esc, lit_ev: dict, full: dict) -> str:
-    """生成一条序列的圆形柱状图卡片（div + 中心最终分 + 点击跳转 + ECharts 脚本）。"""
+    """Render the circular-bar-chart card for one sequence (div + centre final score + click jump + ECharts script)."""
     global _cbar_uid
     _cbar_uid += 1
     uid = _cbar_uid
@@ -285,16 +309,16 @@ def _cbar_html(o: dict, sr: dict, esc, lit_ev: dict, full: dict) -> str:
     head = (
         f'<div class="cbar-head"><b>{esc(o.get("id", ""))}</b> '
         f'<span class="tag {esc(tier)}">{esc(tier)}</span>'
-        f'<div class="cbar-sub">{esc(o.get("sample", ""))} · L段</div></div>'
+        f'<div class="cbar-sub">{esc(o.get("sample", ""))} · L segment</div></div>'
     )
     center = (
         f'<div class="cbar-center"><div class="cbar-score">{esc(o.get("final_score", ""))}</div>'
-        f'<div class="cbar-score-label">最终分</div></div>'
+        f'<div class="cbar-score-label">Final score</div></div>'
     )
     links = (
         f'<div class="cbar-links">'
-        f'<a href="#seq-{esc(key)}">第5节明细→</a> '
-        f'<a href="#kg-{esc(key)}">第6节知识图谱→</a></div>'
+        f'<a href="#seq-{esc(key)}">Section 5 detail →</a> '
+        f'<a href="#kg-{esc(key)}">Section 6 KG →</a></div>'
     )
     script = (
         f'<script>var c=echarts.init(document.getElementById("cbar_{uid}"));'
@@ -312,37 +336,38 @@ def _cbar_html(o: dict, sr: dict, esc, lit_ev: dict, full: dict) -> str:
 
 def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
                       relations: list[dict] | None, qc_dir: Path | None,
-                      rows_full: list[dict] | None = None) -> None:
-    """生成自包含 HTML 报告：质控（fastp 超链接）→ 打分 → 判断依据（知识图谱 + 建议）。"""
+                      rows_full: list[dict] | None = None,
+                      species_lit: dict | None = None) -> None:
+    """Generate a self-contained HTML report: QC (fastp links) → scoring → rationale (KG + recommendations)."""
     esc = _esc
 
-    # 完整行（含原始比对/树列）按 sample_id 建索引，供悬停细化
+    # Index full rows (raw alignment / tree columns) by sample_id for hover detail
     full_by_key: dict[str, dict] = {}
     for f in (rows_full or []):
         key = f"{f.get('sample', '')}_{f.get('id', '')}"
         if key:
             full_by_key[key] = f
 
-    # ---- 知识图谱关系按物种分组（record_id 为 sample_contig，与行级 key 对应）----
+    # ---- Group KG relations by species (record_id is sample_contig, matching the row key) ----
     key2sp: dict[str, str] = {}
     for o in rows_out:
         key = f"{o.get('sample', '')}_{o.get('id', '')}"
         if key and key not in key2sp:
-            key2sp[key] = o.get("species", "未分类")
+            key2sp[key] = o.get("species", "Unclassified")
     rels_by_sp: dict[str, list[dict]] = defaultdict(list)
     for rel in (relations or []):
         sp = key2sp.get(str(rel.get("record_id") or ""))
         if sp:
             rels_by_sp[sp].append(rel)
-    # 文献证据（按物种）：4 性状各自支撑关系（PMID + 证据句）
+    # Literature evidence (per species): supporting relations for the 4 traits (PMID + evidence sentence)
     lit_ev_by_sp = {sp: _lit_evidence(sp, rels_by_sp) for sp in species_risk}
-    # 需要建第6节锚点的 contig：有关系的 contig + 全部 L 段 contig
+    # Contigs needing a Section-6 anchor: contigs with relations + all L-segment contigs
     rel_keys = {str(rel.get("record_id")) for rel in (relations or [])}
     l_keys = {f"{o.get('sample', '')}_{o.get('id', '')}" for o in rows_out
               if str(o.get("segment", "")).strip().lower() == "l"}
     kg_keys = rel_keys | l_keys
 
-    # ---- 质控样本（按结果表出现顺序去重；只列有检出的样本）----
+    # ---- QC samples (deduplicated in result-table order; only samples with detections) ----
     sample_order: list[str] = []
     seen: set[str] = set()
     for o in rows_out:
@@ -365,7 +390,7 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
         cnt = sum(1 for o in rows_out if (o.get("sample") or "").strip() == s)
         qc_rows.append({"sample": s, "exists": exists, "href": href, "count": cnt})
 
-    # ---- 基本统计 ----
+    # ---- Basic statistics ----
     n_rows = len(rows_out)
     n_species = len(species_risk)
     tier_counts: dict[str, int] = defaultdict(int)
@@ -374,19 +399,45 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
 
     by_sp: dict[str, list[dict]] = defaultdict(list)
     for o in rows_out:
-        by_sp[o.get("species", "未分类")].append(o)
+        by_sp[o.get("species", "Unclassified")].append(o)
     ordered = sorted(species_risk.values(), key=lambda x: x.get("species_risk_score", 0.0), reverse=True)
 
     def tag(tier: str) -> str:
         return f'<span class="tag {esc(tier)}">{esc(tier)}</span>'
 
+    def _cap(x: str) -> str:
+        return (x[0].upper() + x[1:]) if x else x
+
+    def format_host_cell(sr: dict) -> str:
+        """Host-type cell of table 03: class name + specific species (italic binomials) + human-isolate marker.
+
+        - show full binomials only; fall back to genus/generic names when needed
+        - list up to 2 in full, collapse 3+ to "first et al. (N species)"
+        """
+        out = [esc(_en_host(sr.get("host_desc", "")) or "—")]
+        species = [s for s in str(sr.get("host_species", "") or "").split("; ") if s]
+        full = [_cap(s) for s in species if " " in s]
+        short = [_cap(s) for s in species if " " not in s]
+        shown = full if full else short
+        if shown:
+            if len(shown) == 1:
+                txt = f"<i>{esc(shown[0])}</i>"
+            elif len(shown) == 2:
+                txt = ", ".join(f"<i>{esc(s)}</i>" for s in shown)
+            else:
+                txt = f"<i>{esc(shown[0])}</i> et al. ({len(species)} species)"
+            out.append(txt)
+        if str(sr.get("human_isolation", "")).lower() in ("true", "1"):
+            out.append('<span class="note">(human isolate)</span>')
+        return "<br>".join(out)
+
     L: list[str] = []
     L.append("<!DOCTYPE html>")
-    L.append('<html lang="zh-CN">')
+    L.append('<html lang="en">')
     L.append("<head>")
     L.append('<meta charset="utf-8">')
     L.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
-    L.append("<title>汉坦病毒检出与风险评分评估报告</title>")
+    L.append("<title>Hantavirus Detection and Risk Scoring Report</title>")
     L.append("<style>")
     L.append(":root{--accent:#2166ac;--text:#1d1d1f;--muted:#6e6e73;--border:#e5e5e7;}")
     L.append("html{scroll-behavior:smooth;}")
@@ -451,125 +502,169 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
     L.append("</head>")
     L.append("<body>")
 
-    # 顶部导航
+    # Top navigation
     L.append('<nav class="topnav"><div class="topnav-inner">'
-             '<div class="topnav-title">汉坦病毒风险评分</div>'
+             '<div class="topnav-title">Hantavirus Risk Scoring</div>'
              '<div class="topnav-links">'
-             '<a href="#s1">质控</a><a href="#s2">摘要</a><a href="#s3">总览</a>'
-             '<a href="#s4">详情</a><a href="#s5">明细</a><a href="#s6">依据</a>'
+             '<a href="#s0">Contents</a><a href="#s1">QC</a><a href="#s2">Summary</a><a href="#s3">Overview</a>'
+             '<a href="#s4">Details</a><a href="#s5">Evidence</a><a href="#s6">Assessment</a>'
              '</div></div></nav>')
 
     # Hero
     L.append('<header class="hero">')
     L.append('<div class="hero-badge">Hantavirus Risk Assessment</div>')
-    L.append('<h1>汉坦病毒检出与风险评分<br>评估报告</h1>')
-    L.append(f'<p class="hero-sub">{n_rows} 条检出序列 · {n_species} 个物种 · 检出可信度 × 物种风险分</p>')
-    L.append(f'<p class="hero-meta">高 {tier_counts.get("High", 0)} ｜ 中 {tier_counts.get("Medium", 0)} ｜ 低 {tier_counts.get("Low", 0)} ｜ 生成日期 {date.today()}</p>')
+    L.append('<h1>Hantavirus Detection and Risk<br>Scoring Report</h1>')
+    L.append(f'<p class="hero-sub">{n_rows} detected sequences · {n_species} species · detection confidence × species risk</p>')
+    L.append(f'<p class="hero-meta">High {tier_counts.get("High", 0)} | Medium {tier_counts.get("Medium", 0)} | Low {tier_counts.get("Low", 0)} | Generated on {date.today()}</p>')
     L.append('</header>')
     L.append('<main class="container">')
 
-    # 1 质控情况
+    # 0 Contents
+    L.append('<div class="section fade" id="s0">')
+    L.append('<h2><span class="sec-no">00</span>Contents</h2>')
+    L.append('<p class="note">Description of the final result files under 00_results; start with report.html (this report).</p>')
+    L.append("<table><tr><th>File</th><th>Description</th></tr>")
+    result_desc = {
+        "all_vmr_final_classified.tsv": "Combined summary table",
+        "l.fasta": "Extracted hantavirus L-segment protein sequences",
+        "l.fasta.csv": "LucaProt predictions (id + probability)",
+        "RdRPs_only_using_threshold0.500000.csv": "LucaProt results: RdRps above the 0.5 threshold",
+        "results.tsv": "Final results",
+        "species_risk.tsv": "Species risk scores (High/Medium/Low)",
+        "report_inputs.json": "Intermediate file for step 5.3 → 5.4 (not needed)",
+        "report.html": "Result report (read first)",
+    }
+    existing_files = {p.name for p in path.parent.iterdir() if p.is_file()}
+    ordered_names = [n for n in result_desc if n in existing_files]
+    ordered_names += sorted(existing_files - set(result_desc))
+    for name in ordered_names:
+        desc = result_desc.get(name, "Other output files")
+        L.append(f"<tr><td>{esc(name)}</td><td>{esc(desc)}</td></tr>")
+    L.append("</table>")
+    L.append("</div>")
+
+    # 1 Summary: tier counts + high-risk species table
     L.append('<div class="section fade" id="s1">')
-    L.append('<h2><span class="sec-no">01</span>质控情况</h2>')
-    L.append('<p class="note">仅列出有汉坦病毒检出的样本；点击样本名打开 fastp 质控报告。</p>')
-    L.append("<table><tr><th>样本</th><th>质控报告</th><th>检出序列数</th></tr>")
+    L.append('<h2><span class="sec-no">01</span>Summary</h2>')
+    L.append(f"<p>Species tiers: High {tier_counts.get('High', 0)}, Medium {tier_counts.get('Medium', 0)}, Low {tier_counts.get('Low', 0)}.</p>")
+    L.append("<table><tr><th>High-risk species</th><th>Contigs</th><th>Positive samples</th><th>Representative samples</th></tr>")
+    for sr in [x for x in ordered if x.get("tier") == "High"]:
+        sp = sr.get("species", "")
+        rows_sp = by_sp.get(sp, [])
+        samp_cnt = defaultdict(int)
+        for o in rows_sp:
+            s_ = (o.get("sample") or "").strip()
+            if s_:
+                samp_cnt[s_] += 1
+        top2 = ", ".join(k for k, _ in sorted(samp_cnt.items(), key=lambda kv: -kv[1])[:2])
+        L.append(f"<tr><td>{esc(sp)}</td><td>{len(rows_sp)}</td><td>{len(samp_cnt)}</td><td>{esc(top2)}</td></tr>")
+    L.append("</table>")
+    L.append("</div>")
+
+    # 2 Quality control
+    L.append('<div class="section fade" id="s2">')
+    L.append('<h2><span class="sec-no">02</span>Quality control</h2>')
+    L.append('<p class="note">Only samples with hantavirus detections are listed; click a sample name to open its fastp QC report.</p>')
+    L.append("<table><tr><th>Sample</th><th>QC report</th><th>Detected contigs</th></tr>")
     for q in qc_rows:
         name = esc(q["sample"])
         if q["exists"]:
             cell = f'<a href="{esc(q["href"])}" target="_blank">{name}</a>'
         else:
-            cell = f'{name}<span class="note">（无质控报告）</span>'
+            cell = f'{name}<span class="note">(no QC report)</span>'
         L.append(f"<tr><td>{name}</td><td>{cell}</td><td>{q['count']}</td></tr>")
     L.append("</table>")
     L.append("</div>")
 
-    # 2 摘要
-    L.append('<div class="section fade" id="s2">')
-    L.append('<h2><span class="sec-no">02</span>摘要</h2>')
-    L.append(f"<p>本报告对 {n_rows} 条检出序列（涉及 {n_species} 个物种/病毒）计算「检出可信度 × 物种风险分」，并划分高/中/低三档。</p>")
-    L.append(f"<p>物种三档分布：高 {tier_counts.get('High', 0)} 个、中 {tier_counts.get('Medium', 0)} 个、低 {tier_counts.get('Low', 0)} 个。</p>")
-    L.append("</div>")
-
-    # 3 判定结果总览
+    # 3 Species-level verdict
     L.append('<div class="section fade" id="s3">')
-    L.append('<h2><span class="sec-no">03</span>判定结果总览</h2>')
-    L.append("<table><tr><th>物种</th><th>病毒名</th><th>序列数</th><th>宿主类型</th><th>物种风险分</th><th>判定</th></tr>")
+    L.append('<h2><span class="sec-no">03</span>Species-level verdict</h2>')
+    L.append("<table><tr><th>Species</th><th>Virus</th><th>Sequences</th><th>Host type</th><th>Species risk</th><th>Verdict</th></tr>")
     for sr in ordered:
         sp = sr.get("species", "")
         rows_sp = by_sp.get(sp, [])
         virus_name = next((o.get("virus_name", "") for o in rows_sp if o.get("virus_name")), "")
         L.append(
             f"<tr><td>{esc(sp)}</td><td>{esc(virus_name)}</td><td>{len(rows_sp)}</td>"
-            f"<td>{esc(sr.get('host_desc', ''))}</td><td>{sr.get('species_risk_score', '')}</td>"
+            f"<td>{format_host_cell(sr)}</td><td>{sr.get('species_risk_score', '')}</td>"
             f"<td>{tag(sr.get('tier', 'Low'))}</td></tr>"
         )
     L.append("</table>")
     L.append("</div>")
 
-    # 4 各物种评估详情
+    # 4 Species-level assessment details
     L.append('<div class="section fade" id="s4">')
-    L.append('<h2><span class="sec-no">04</span>各物种评估详情</h2>')
-    L.append('<div class="note" style="margin:8px 0;">圆形柱状图：内环=检出可信度（'
+    L.append('<h2><span class="sec-no">04</span>Species-level assessment details</h2>')
+    L.append('<div class="note" style="margin:8px 0;">Circular bar charts: inner ring = detection confidence ('
              '<span style="color:#2166ac;">●DIAMOND</span> '
-             '<span style="color:#67a9cf;">●树</span> '
-             '<span style="color:#d1e5f0;">●LucaProt</span>）；外环=物种风险分：宿主（'
-             '<span style="color:#e08214;">●宿主类型</span> '
-             '<span style="color:#f4a582;">●宿主广度</span>）、系统发育（'
-             '<span style="color:#7570b3;">●系统发育</span>）、文献（'
-             '<span style="color:#1b7837;">●重配</span> '
-             '<span style="color:#5aae61;">●宿主转换</span> '
-             '<span style="color:#a6dba0;">●共感染</span> '
-             '<span style="color:#d9f0d3;">●近缘</span>）、人类感染（'
-             '<span style="color:#d73027;">●人类感染</span>）。柱长=该项÷满分，未命中画灰柱；悬停看数值与文献 PMID。</div>')
+             '<span style="color:#67a9cf;">●Tree</span> '
+             '<span style="color:#d1e5f0;">●LucaProt</span>); outer ring = species risk: host ('
+             '<span style="color:#e08214;">●Host type</span> '
+             '<span style="color:#f4a582;">●Host breadth</span>), phylogeny ('
+             '<span style="color:#7570b3;">●Phylogeny</span>), literature ('
+             '<span style="color:#1b7837;">●Reassortment</span> '
+             '<span style="color:#5aae61;">●Host switching</span> '
+             '<span style="color:#a6dba0;">●Coinfection</span> '
+             '<span style="color:#d9f0d3;">●Related</span>), human infection ('
+             '<span style="color:#d73027;">●Human infection</span>). Bar length = item score ÷ full mark; missed items are drawn grey; hover for values and PMIDs.</div>')
     for idx, sr in enumerate(ordered, 1):
         sp = sr.get("species", "")
         rows_sp = by_sp.get(sp, [])
         virus_name = next((o.get("virus_name", "") for o in rows_sp if o.get("virus_name")), "")
-        pmids = "; ".join(sr.get("human_pmids", [])) or "无"
-        human_src = "有" if (sr.get("human_infection_vmr") or sr.get("human_infection_literature")) else "无"
+        pmids = "; ".join(sr.get("human_pmids", [])) or "None"
+        if sr.get("human_infection_vmr"):
+            human_src = "Yes (VMR human isolate)"
+        elif sr.get("human_infection_literature"):
+            human_src = f"Yes (literature report, PMID: {pmids})"
+        else:
+            human_src = "None"
         L.append(f"<h3>4.{idx} {esc(sp)}</h3>")
         L.append("<ul>")
         if virus_name:
-            L.append(f"<li>病毒名：{esc(virus_name)}</li>")
-        L.append(f"<li>宿主：{esc(sr.get('host_desc', ''))}（类型 {esc(sr.get('host_class', ''))}）</li>")
-        L.append(f"<li>检出序列数：{len(rows_sp)}</li>")
+            L.append(f"<li>Virus name: {esc(virus_name)}</li>")
+        L.append(f"<li>Host: {esc(_en_host(sr.get('host_desc', '')))}(class {esc(sr.get('host_class', ''))}, "
+                 f"source {esc(HOST_SOURCE_CN.get(str(sr.get('host_source', '')), str(sr.get('host_source', '')) or '-'))})</li>")
+        L.append(f"<li>Natural host: {esc(sr.get('host_species', '') or '—')}</li>")
+        human_iso_txt = "Yes" if str(sr.get("human_isolation", "")).lower() in ("true", "1") else "No"
+        L.append(f"<li>Human isolate: {human_iso_txt}</li>")
+        L.append(f"<li>Detected sequences: {len(rows_sp)}</li>")
         L.append(
-            f"<li>分项：宿主类型 {sr.get('host_type_score', 0)} + 宿主广度 {sr.get('host_breadth_score', 0)} + "
-            f"系统发育 {sr.get('phylogeny_score', 0)} + 文献 {sr.get('literature_score', 0)} + "
-            f"人类感染 {sr.get('human_infection_score', 0)}</li>"
+            f"<li>Components: Host type {sr.get('host_type_score', 0)} + Host breadth {sr.get('host_breadth_score', 0)} + "
+            f"Phylogeny {sr.get('phylogeny_score', 0)} + Literature {sr.get('literature_score', 0)} + "
+            f"Human infection {sr.get('human_infection_score', 0)}</li>"
         )
-        L.append(f"<li>物种风险分：<b>{sr.get('species_risk_score', '')}</b> → 判定：{tag(sr.get('tier', 'Low'))}</li>")
-        L.append(f"<li>人类感染证据：{human_src}（PMID：{esc(pmids)}）</li>")
+        L.append(f"<li>Species risk score: <b>{sr.get('species_risk_score', '')}</b> → Verdict: {tag(sr.get('tier', 'Low'))}</li>")
+        L.append(f"<li>Human-infection evidence: {esc(human_src)}</li>")
         L.append("</ul>")
 
-        # 文献/人类感染证据来源（物种级，PMID 可点击）
+        # Literature / human-infection evidence sources (species-level, PMIDs clickable)
         lit_ev = lit_ev_by_sp.get(sp, {})
         src_parts = []
         for trait, cn in LIT_TRAIT_CN.items():
             if (sr.get("literature_detail") or {}).get(trait) is True:
                 pms = sorted({str(r.get("pmid")) for r in lit_ev.get(trait, []) if r.get("pmid")})
                 if pms:
-                    links = "、".join(
+                    links = ", ".join(
                         f'<a href="https://pubmed.ncbi.nlm.nih.gov/{esc(p)}/" target="_blank">PMID:{esc(p)}</a>'
                         for p in pms)
-                    src_parts.append(f"{cn}（{links}）")
+                    src_parts.append(f"{cn}({links})")
                 else:
                     src_parts.append(cn)
         if sr.get("human_infection_vmr"):
-            src_parts.append("人类感染（VMR 官方人类分离株）")
+            src_parts.append("Human infection (VMR official human isolate)")
         elif sr.get("human_infection_literature") and sr.get("human_pmids"):
-            links = "、".join(
+            links = ", ".join(
                 f'<a href="https://pubmed.ncbi.nlm.nih.gov/{esc(p)}/" target="_blank">PMID:{esc(p)}</a>'
                 for p in sr.get("human_pmids", []))
-            src_parts.append(f"人类感染（{links}）")
+            src_parts.append(f"Human infection ({links})")
         if src_parts:
-            L.append(f'<p class="note">文献/人类感染证据来源：{"；".join(src_parts)}</p>')
+            L.append(f'<p class="note">Literature / human-infection evidence sources: {"; ".join(src_parts)}</p>')
         else:
-            L.append('<p class="note">文献/人类感染证据来源：无。</p>')
+            L.append('<p class="note">Literature / human-infection evidence sources: None.</p>')
 
         l_rows = [o for o in rows_sp if str(o.get("segment", "")).strip().lower() == "l"]
         if l_rows:
-            L.append('<p class="note">该物种 L 段序列打分来源（悬停看原始依据与文献 PMID，点图跳转第5/6节）：</p>')
+            L.append('<p class="note">Scoring sources for the L-segment sequences of this species (hover for evidence and PMIDs; click to jump to Section 5/6):</p>')
             L.append('<div class="cbar-grid">')
             for o in l_rows:
                 key = f"{o.get('sample', '')}_{o.get('id', '')}"
@@ -577,19 +672,19 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
             L.append('</div>')
     L.append("</div>")
 
-    # 5 检出可信度明细（默认展开，可折叠；点圆图跳到这里并高亮该行）
+    # 5 Per-contig evidence (expanded by default, collapsible; chart click jumps here and highlights the row)
     L.append('<div class="section fade" id="s5">')
-    L.append('<h2><span class="sec-no">05</span>检出可信度明细</h2>')
+    L.append('<h2><span class="sec-no">05</span>Per-contig evidence</h2>')
     L.append("<details open>")
-    L.append("<summary>点击折叠 / 展开明细表</summary>")
-    L.append("<table><tr><th>样本</th><th>序列ID</th><th>片段</th><th>DIAMOND</th><th>树</th><th>LucaProt</th><th>检出可信度</th><th>物种风险分</th><th>最终分</th><th>判定</th><th>跳转</th></tr>")
+    L.append("<summary>Click to collapse / expand the table</summary>")
+    L.append("<table><tr><th>Sample</th><th>Contig ID</th><th>Segment</th><th>DIAMOND</th><th>Tree</th><th>LucaProt</th><th>Detection confidence</th><th>Species risk</th><th>Final score</th><th>Verdict</th><th>Jump</th></tr>")
     for o in rows_out:
         seg = (o.get("segment") or "").strip().upper() or "-"
         d_tree = o.get("detection_tree") or "-"
         d_luca = o.get("detection_lucaprot") or "-"
         key = f"{o.get('sample', '')}_{o.get('id', '')}"
-        kg_link = f'<a href="#kg-{esc(key)}">知识图谱→</a>' if key in kg_keys else "—"
-        chart_link = f'<a href="#chart-{esc(key)}">返回图→</a>' if key in l_keys else "—"
+        kg_link = f'<a href="#kg-{esc(key)}">KG →</a>' if key in kg_keys else "—"
+        chart_link = f'<a href="#chart-{esc(key)}">Back to chart →</a>' if key in l_keys else "—"
         L.append(
             f'<tr id="seq-{esc(key)}">'
             f"<td>{esc(o.get('sample', ''))}</td><td>{esc(o.get('id', ''))}</td><td>{esc(seg)}</td>"
@@ -602,10 +697,10 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
     L.append("</details>")
     L.append("</div>")
 
-    # 6 判断依据与建议（知识图谱 + 打分分项 + 建议；关系按 contig 拆分，可点图/链接跳转定位）
+    # 6 Evidence and recommendations (KG + score components + recommendation; relations split by contig, clickable anchors)
     L.append('<div class="section fade" id="s6">')
-    L.append('<h2><span class="sec-no">06</span>判断依据与建议</h2>')
-    L.append('<p class="note">以下列出每个物种的打分分项、建议，以及按 contig 拆分的知识图谱文献证据（附 PMID 与证据句）。</p>')
+    L.append('<h2><span class="sec-no">06</span>Evidence and recommendations</h2>')
+    L.append('<p class="note">For each species, the score components, recommendation, and contig-level knowledge-graph literature evidence (with PMIDs and evidence sentences) are listed below.</p>')
 
     def render_rel(rel):
         relt = rel.get("relation") or "relation"
@@ -615,14 +710,14 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
         pmid = rel.get("pmid") or ""
         sent = (rel.get("evidence_sentence") or "").strip()
         direct = rel.get("direct_target_match")
-        direct_note = "直接证据" if direct is True else "背景/相关"
+        direct_note = "Direct evidence" if direct is True else "Context/related"
         pmid_html = (f'<a href="https://pubmed.ncbi.nlm.nih.gov/{esc(pmid)}/" target="_blank">PMID:{esc(pmid)}</a>'
                      if pmid else "—")
         obj_part = f" → {esc(obj)}" if obj else ""
-        out = [f'<div class="evidence"><b>{esc(rel_cn)}</b>（{esc(relt)}）｜{esc(subject)}{obj_part}｜'
-               f'{pmid_html}｜<span class="note">{direct_note}</span>']
+        out = [f'<div class="evidence"><b>{esc(rel_cn)}</b>({esc(relt)}) | {esc(subject)}{obj_part} | '
+               f'{pmid_html} | <span class="note">{direct_note}</span>']
         if sent:
-            out.append(f'<br><span class="note">证据句：{esc(sent[:300])}</span>')
+            out.append(f'<br><span class="note">Evidence sentence: {esc(sent[:300])}</span>')
         out.append("</div>")
         return "".join(out)
 
@@ -631,22 +726,36 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
         rels = rels_by_sp.get(sp, [])
         tier = sr.get("tier", "Low")
         suggest = {
-            "High": "建议补充同种病毒多样本序列、采样元数据并复核文献证据。",
-            "Medium": "建议持续跟踪新增文献与宿主关联证据。",
-            "Low": "建议常规监测，结合宿主分布持续关注。",
-        }.get(tier, "建议持续跟踪新增文献与宿主关联证据。")
+            "High": "Recommend adding more sequences of the same species, sampling metadata, and re-checking the literature evidence.",
+            "Medium": "Recommend continuous tracking of new literature and host-association evidence.",
+            "Low": "Routine monitoring is recommended, with attention to host distribution.",
+        }.get(tier, "Recommend continuous tracking of new literature and host-association evidence.")
         L.append(f"<h3>6.{idx} {esc(sp)}</h3>")
         L.append("<ul>")
         L.append(
-            f"<li>打分分项：宿主类型 {sr.get('host_type_score', 0)} + 宿主广度 {sr.get('host_breadth_score', 0)} + "
-            f"系统发育 {sr.get('phylogeny_score', 0)} + 文献 {sr.get('literature_score', 0)} + "
-            f"人类感染 {sr.get('human_infection_score', 0)} = 物种风险分 {sr.get('species_risk_score', '')}（{tag(tier)}）</li>"
+            f"<li>Score components: Host type {sr.get('host_type_score', 0)} + Host breadth {sr.get('host_breadth_score', 0)} + "
+            f"Phylogeny {sr.get('phylogeny_score', 0)} + Literature {sr.get('literature_score', 0)} + "
+            f"Human infection {sr.get('human_infection_score', 0)} = Species risk score {sr.get('species_risk_score', '')} ({tag(tier)})</li>"
         )
-        L.append(f"<li>知识图谱证据：共 {len(rels)} 条关系</li>")
-        L.append(f"<li>建议：{suggest}</li>")
+        # KG (contig-level) relations: state honestly when none were produced, so "0 relations" is not misread as "no literature"
+        if rels:
+            L.append(f"<li>Knowledge-graph evidence: {len(rels)} relations</li>")
+        else:
+            L.append('<li>Knowledge-graph evidence: no contig-level relations were produced in this run (that step was not executed); species-level literature results follow.</li>')
+        # Species-level literature evidence (PMIDs of human-infection reports from PubTator3; contig-level KG is a separate step)
+        lit = (species_lit or {}).get(sp) or {}
+        lit_pmids = [str(p) for p in (lit.get("pmids") or []) if str(p).strip()]
+        if lit_pmids:
+            links = ", ".join(
+                f'<a href="https://pubmed.ncbi.nlm.nih.gov/{esc(p)}/" target="_blank">PMID:{esc(p)}</a>'
+                for p in lit_pmids)
+            L.append(f"<li>Literature evidence (species-level): {links} ({len(lit_pmids)} reports of human infection)</li>")
+        elif lit:
+            L.append("<li>Literature evidence (species-level): no human-infection reports found</li>")
+        L.append(f"<li>Recommendation: {suggest}</li>")
         L.append("</ul>")
 
-        # 按 contig 拆关系（只给「有关系的 contig + L 段 contig」建锚点）
+        # Split relations by contig (anchors only for "contigs with relations + L-segment contigs")
         rels_by_contig = defaultdict(list)
         for rel in rels:
             rels_by_contig[str(rel.get("record_id") or "")].append(rel)
@@ -661,21 +770,21 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
                 contig_keys.append(k)
         for ck in contig_keys:
             crels = rels_by_contig.get(ck, [])
-            back = f' <a class="note" href="#chart-{esc(ck)}">[返回图]</a>' if ck in l_keys else ""
-            L.append(f'<h4 id="kg-{esc(ck)}">{esc(ck)}（{len(crels)} 条关系）{back}</h4>')
+            back = f' <a class="note" href="#chart-{esc(ck)}">[Back to chart]</a>' if ck in l_keys else ""
+            L.append(f'<h4 id="kg-{esc(ck)}">{esc(ck)}({len(crels)} relations){back}</h4>')
             if crels:
                 L.append("<div>")
                 for rel in crels[:20]:
                     L.append(render_rel(rel))
                 if len(crels) > 20:
-                    L.append(f'<p class="note">……仅显示前 20 条，共 {len(crels)} 条。</p>')
+                    L.append(f'<p class="note">... showing the first 20 of {len(crels)}.</p>')
                 L.append("</div>")
             else:
-                L.append('<p class="note">无文献关系证据。</p>')
+                L.append('<p class="note">No literature relation evidence.</p>')
 
     L.append("</div>")
     L.append("</main>")
-    L.append('<button class="totop" id="totop" aria-label="回到顶部">↑</button>')
+    L.append('<button class="totop" id="totop" aria-label="Back to top">↑</button>')
     L.append("<script>")
     L.append("(function(){var b=document.getElementById('totop');window.addEventListener('scroll',function(){b.classList.toggle('show',window.scrollY>600);});b.addEventListener('click',function(){window.scrollTo({top:0,behavior:'smooth'});});})();")
     L.append("(function(){var reveal=function(){document.querySelectorAll('.fade').forEach(function(el){el.classList.add('fade-in');});};if('IntersectionObserver' in window){var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('fade-in');io.unobserve(e.target);}});},{threshold:0.05});document.querySelectorAll('.fade').forEach(function(el){io.observe(el);});}else{reveal();}window.addEventListener('hashchange',reveal);setTimeout(reveal,3000);})();")
@@ -688,13 +797,13 @@ def write_report_html(path: Path, rows_out: list[dict], species_risk: dict,
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="5.4 报告生成：读取 5.3 的 report_inputs.json → report.html")
+    p = argparse.ArgumentParser(description="5.4 Report generation: read report_inputs.json from step 5.3 → report.html")
     p.add_argument("--config", type=str, default="",
-                   help="config.yaml 路径；从 results_dir/00_results/report_inputs.json 读取")
+                   help="path to config.yaml; reads results_dir/00_results/report_inputs.json")
     p.add_argument("--bundle", type=Path, default=None,
-                   help="report_inputs.json 路径（不配合 --config 时使用）")
+                   help="path to report_inputs.json (used without --config)")
     p.add_argument("--output", type=Path, default=None,
-                   help="输出 HTML 路径；默认 bundle 同目录 report.html")
+                   help="output HTML path; defaults to report.html in the bundle directory")
     return p.parse_args()
 
 
@@ -711,11 +820,11 @@ def main() -> int:
         bundle_path = args.bundle
         outdir = bundle_path.parent
     else:
-        print("需要 --bundle（或 --config）", file=sys.stderr)
+        print("Requires --bundle (or --config)", file=sys.stderr)
         return 2
 
     if not bundle_path.is_file():
-        print(f"未找到 5.3 中间文件：{bundle_path}", file=sys.stderr)
+        print(f"Step-5.3 intermediate file not found: {bundle_path}", file=sys.stderr)
         return 2
 
     data = json.loads(bundle_path.read_text(encoding="utf-8"))
@@ -725,8 +834,18 @@ def main() -> int:
     relations = data.get("relations") or None
     qc_dir = Path(data["qc_dir"]) if data.get("qc_dir") else None
 
+    # Species-level literature evidence (pre-fetched PubTator3 results, optional)
+    species_lit: dict = {}
+    sp_lit_path = bundle_path.parent / "species_pmids.json"
+    if sp_lit_path.is_file():
+        try:
+            species_lit = (json.loads(sp_lit_path.read_text(encoding="utf-8")) or {}).get("species", {})
+            print(f"[info] Loaded species-level literature evidence for {len(species_lit)} species", file=sys.stderr)
+        except Exception as e:
+            print(f"[warning] Failed to read species_pmids.json: {e}", file=sys.stderr)
+
     out_html = args.output or (outdir / "report.html")
-    write_report_html(out_html, rows, species, relations, qc_dir, rows_full)
+    write_report_html(out_html, rows, species, relations, qc_dir, rows_full, species_lit)
     print(json.dumps({"html": str(out_html),
                       "row_count": len(rows),
                       "species_count": len(species)}, ensure_ascii=False))

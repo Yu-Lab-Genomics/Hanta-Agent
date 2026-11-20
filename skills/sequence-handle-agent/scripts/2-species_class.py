@@ -8,16 +8,17 @@ import subprocess
 import sys
 from pathlib import Path
 """
-对于megahit组装后的contigs.fasta文件，使用DIAMOND进行物种分类，输出到06_diamond_vmr目录下
+Classify MEGAHIT contigs with DIAMOND and write the hits to 06_diamond_vmr/.
 
-text                                                                                                                                                                                          
-读取 skills_V2/config.yaml                                                                                                                                                                    
-读取 <results_dir>/json/.json                                                                                                                                                         
-提取 outputs.contigs_fasta                                                                                                                                                           
-对 vmr_l / vmr_m / vmr_s 三个 DIAMOND 数据库生成并执行 blastx                                                                                                                                 
-输出到 <results_dir>/06_diamond_vmr/                                                                                                                                                                   
-日志写到 <results_dir>/log/<sample>/                                                                                                                                                                
-结构化 JSON 写到 <results_dir>/json/<sample>.species_class.json 
+Steps
+-----
+1. Read the configuration (auto-discovered, or passed with -c).
+2. Read <results_dir>/json/<sample>.qc.json.
+3. Extract outputs.contigs_fasta from it.
+4. Run blastx against the three DIAMOND databases: vmr_l, vmr_m, vmr_s.
+5. Write hits to <results_dir>/06_diamond_vmr/.
+6. Write logs to <results_dir>/log/<sample>/.
+7. Write a structured result to <results_dir>/json/<sample>.species_class.json.
 """
 
 DB_NAMES = ["vmr_l", "vmr_m", "vmr_s"]
@@ -79,7 +80,7 @@ def find_samples(json_dir, wanted_sample):
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
         except Exception as e:
-            raise RuntimeError("读取 JSON 失败: %s: %s" % (json_file, e))
+            raise RuntimeError("Failed to read JSON: %s: %s" % (json_file, e))
         if not isinstance(data, dict):
             continue
         for sample, item in data.items():
@@ -127,26 +128,49 @@ def run_cmd(cmd, log_file, dry_run):
         return p.returncode
 
 
+def find_default_config(script_dir):
+    """Locate the shared configuration by walking up from this script.
+
+    Handles both supported layouts:
+      * skill layout  <root>/<skill>/scripts/<script>.py  -> <root>/config.yaml
+      * flat layout   <root>/<script>.py                  -> <root>/config.yaml
+        (or a named project config in the same directory)
+
+    Walking up instead of hard-coding a path keeps the script usable after it is
+    moved into a skill directory. An explicit ``-c`` always wins.
+    """
+    for d in (script_dir, script_dir.parent,
+              script_dir.parent.parent, script_dir.parent.parent.parent):
+        for name in ("config.yaml", "config-cell-paper.yaml",
+                     "cell_submit-paper.yaml"):
+            cand = d / name
+            if cand.is_file():
+                return cand
+    return script_dir.parent.parent / "skills_V2" / "config.yaml"
+
+
 def main():
     script_dir = Path(__file__).resolve().parent
-    default_config = script_dir.parent.parent / "skills_V2" / "config.yaml"
+    default_config = find_default_config(script_dir)
 
     parser = argparse.ArgumentParser(description="DIAMOND species classification for hantavirus contigs")
-    parser.add_argument("-s", "--sample", default="", help="只处理指定样本")
-    parser.add_argument("-c", "--config", default=str(default_config), help="配置文件路径")
-    parser.add_argument("--dry-run", action="store_true", help="只生成命令和结果 JSON，不执行 DIAMOND")
-    parser.add_argument("--overwrite", action="store_true", help="允许覆盖已有 tab 输出")
+    parser.add_argument("-s", "--sample", default="", help="process only this sample")
+    parser.add_argument("-c", "--config", default=str(default_config), help="path to config.yaml")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="compose the commands and result JSON without running DIAMOND")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="allow overwriting an existing hit table")
     args = parser.parse_args()
 
     config_path = Path(args.config)
     if not config_path.is_file():
-        print("找不到配置文件: %s" % config_path, file=sys.stderr)
+        print("config file not found: %s" % config_path, file=sys.stderr)
         return 2
 
     cfg = read_simple_yaml(config_path)
     project_dir = cfg.get("project_dir")
     if not project_dir:
-        print("config.yaml 中缺少 project_dir", file=sys.stderr)
+        print("project_dir is missing from config.yaml", file=sys.stderr)
         return 2
 
     project_dir = Path(project_dir)
@@ -158,18 +182,18 @@ def main():
     results_dir = get_path_value(cfg, project_dir, "results_dir", "results")
     json_dir = get_path_value(cfg, results_dir, "json_dir", "json")
     db_dir = project_dir / "DB" / "diamond"
-    out_dir = get_path_value(cfg, results_dir, "diamond_vmr_dir", "06_diamond_vmr")
+    out_dir = results_dir / "06_diamond_vmr"
 
     if not json_dir.is_dir():
-        print("找不到 JSON 目录: %s" % json_dir, file=sys.stderr)
+        print("JSON directory not found: %s" % json_dir, file=sys.stderr)
         return 2
     if not db_dir.is_dir():
-        print("找不到 DIAMOND DB 目录: %s" % db_dir, file=sys.stderr)
+        print("DIAMOND DB directory not found: %s" % db_dir, file=sys.stderr)
         return 2
 
     samples = find_samples(json_dir, args.sample)
     if not samples:
-        print("没有找到可处理的 contigs_fasta", file=sys.stderr)
+        print("no processable contigs_fasta found", file=sys.stderr)
         return 2
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -184,7 +208,9 @@ def main():
         logs = {}
 
         if not query.is_file():
-            write_result(result_json, sample, "failed", "contigs_fasta 不存在: %s" % query, 2, str(query), outputs, logs)
+            write_result(result_json, sample, "failed",
+                         "contigs_fasta does not exist: %s" % query, 2, str(query),
+                         outputs, logs)
             final_code = 2
             continue
 
@@ -200,13 +226,14 @@ def main():
 
             if not db_file.is_file():
                 sample_failed = True
-                message = "数据库不存在: %s" % db_file
+                message = "database does not exist: %s" % db_file
                 final_code = 2
                 break
 
             if out_file.exists() and not args.overwrite:
                 sample_failed = True
-                message = "输出已存在，如需覆盖请加 --overwrite: %s" % out_file
+                message = ("output already exists, pass --overwrite to replace it: %s"
+                           % out_file)
                 final_code = 2
                 break
 
@@ -224,7 +251,7 @@ def main():
             code = run_cmd(cmd, log_file, args.dry_run)
             if code != 0:
                 sample_failed = True
-                message = "%s 比对失败，日志: %s" % (db_name, log_file)
+                message = "%s alignment failed, log: %s" % (db_name, log_file)
                 final_code = code
                 break
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import hashlib
 import json
 import re
 import shlex
@@ -8,21 +9,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from species_norm import normalize_species
+from seqid import read_fasta_ids, strip_prodigal_suffix
+
 """
+Build a phylogenetic tree with IQ-TREE from the *.vmr_final_classified.tsv files
+in 06_diamond_vmr/ and classify every query sequence against it.
 
-基于 06_diamond_vmr 目录下的 *.vmr_final_classified.tsv 文件，使用 IQ-TREE 构建系统发育树，并对每个 query 序列进行分类。
-输出： *.vmr_final_classified.tsv 
-提取所有比对的l蛋白，到00_results目录下，用于lucaprot的分析。
+Also extracts every aligned L protein into 00_results/ for the LucaProt step.
 
-排错机制，在json/*.vmr_cluster.json
-输出	位置
-总表（新）	<results_dir>/00_results/all_vmr_final_classified.tsv
-l.fasta	<results_dir>/00_results/l.fasta
-每样本 TSV（原地更新，加 6 列）	<diamond_vmr_dir>/<样本名>.vmr_final_classified.tsv
-共享树	<results_dir>/07_tree/_all/
-每样本中间文件	<results_dir>/07_tree/<样本名>/
+Diagnostics are written to json/<sample>.vmr_cluster.json.
 
-[重新运行，从2代码开始运行]
+Outputs
+-------
+all_vmr_final_classified.tsv   <results_dir>/00_results/all_vmr_final_classified.tsv
+l.fasta                        <results_dir>/00_results/l.fasta
+per-sample TSV (updated in     <results_dir>/06_diamond_vmr/<sample>.vmr_final_classified.tsv
+place, 6 columns appended)
+shared tree                    <results_dir>/07_tree/_all/
+per-sample intermediates       <results_dir>/07_tree/<sample>/
+
+[To re-run, start from step 2.]
 """
 
 def read_yaml(path):
@@ -57,6 +65,10 @@ def extra(cfg, section, key):
 
 def software(cfg, name, default):
     return value(cfg, "software", name, default)
+
+
+def conda_run(cfg, *args):
+    return ["conda", "run", "-n", cfg.get("conda_env", "") or "lpy-hanta-v2"] + list(args)
 
 
 def run(cmd, log, dry=False, stdout_path=None):
@@ -127,7 +139,7 @@ class Node:
 
 
 def parse_newick(text):
-    """解析 Newick（保留枝长与自展支持度）。"""
+    """Parse Newick, keeping branch lengths and bootstrap support."""
     s = text.strip()
     if s.endswith(";"):
         s = s[:-1]
@@ -228,17 +240,66 @@ def _is_ancestor(anc, node):
     return False
 
 
-def classify_tree_nearest(tree_file, query_ids, species_map):
-    """按“最近姐妹支”分类：取 patristic 距离最近的参考叶子的物种。
+def classify_tree_nearest(tree_file, query_ids, species_map, ref_ids=None):
+    """Classify by nearest sister lineage: take the species of the reference
+    leaf with the smallest patristic distance.
 
-    返回 dict: qid(叶子名) -> dict(species, position, nn, dist, support)
-      position: nested（落在该种单系支内）/ sister（贴支外）
+    Parameters
+    ----------
+    tree_file : Newick file.
+    query_ids : **explicit set of query leaf names** (e.g.
+        {"SRR1_k141_1118_1", ...}). When given, queries and references are
+        split by membership; no name-suffix guessing is involved.
+    species_map : acc_base -> species.
+    ref_ids : **explicit set of reference leaf names** (e.g.
+        {"PX111623.2", ...}). Used to derive the reference leaves only when
+        query_ids is empty.
+
+    Why explicit lists
+    ------------------
+    The previous implementation used `re.compile(r"_\\d+$")` to decide that a
+    leaf ending in `_<digits>` was a query. That misclassified unversioned
+    reference accessions such as NC_055171 as queries, which removed the
+    species' own representative from the tree and produced spurious calls.
+    Explicit lists are used now; the old suffix heuristic survives only as a
+    last resort when neither list is available, and it prints a warning.
+
+    Returns dict: qid (leaf name) -> dict(species, position, nn, dist, support)
+      position: nested (inside that species' monophyletic clade) or
+                sister (attached beside it)
     """
     root = parse_newick(tree_file.read_text(encoding="utf-8", errors="ignore"))
     all_leaves = _subtree_leaves(root)
-    qpat = re.compile(r"_\d+$")
-    query_leaves = [l for l in all_leaves if qpat.search(l.name)]
-    ref_leaves = [l for l in all_leaves if not qpat.search(l.name)]
+    all_names = {l.name for l in all_leaves}
+
+    if query_ids:
+        query_leaves = [l for l in all_leaves if l.name in query_ids]
+        ref_leaves = [l for l in all_leaves if l.name not in query_ids]
+    elif ref_ids:
+        ref_leaves = [l for l in all_leaves if l.name in ref_ids]
+        query_leaves = [l for l in all_leaves if l.name not in ref_ids]
+    else:
+        # Last resort: neither list was supplied, fall back to the old heuristic.
+        # Not recommended; kept only for compatibility.
+        print("[warning] classify_tree_nearest received no query/reference lists; "
+              "falling back to the suffix heuristic. Unversioned reference "
+              "accessions may be misread as queries.", file=sys.stderr)
+        qpat = re.compile(r"_\d+$")
+        query_leaves = [l for l in all_leaves if qpat.search(l.name)]
+        ref_leaves = [l for l in all_leaves if not qpat.search(l.name)]
+
+    # Self-check: with an explicit reference list, confirm every entry is in the
+    # tree. A missing entry means sequences were lost during tree building.
+    if ref_ids:
+        missing = sorted(set(ref_ids) - all_names)
+        if missing:
+            print("[warning] %d/%d references absent from the tree: %s%s"
+                  % (len(missing), len(ref_ids), ", ".join(missing[:5]),
+                     " ..." if len(missing) > 5 else ""), file=sys.stderr)
+    if ref_ids and not ref_leaves:
+        print("[warning] ref_leaves is empty after splitting by the reference "
+              "list; check that tree leaf names match the FASTA identifiers",
+              file=sys.stderr)
 
     ref_species = {}
     for l in ref_leaves:
@@ -271,7 +332,7 @@ def classify_tree_nearest(tree_file, query_ids, species_map):
         cands = []
         while cand_node is not None:
             leaves = _subtree_leaves(cand_node)
-            cands = [l for l in leaves if l in ref_leaves]
+            cands = [l for l in leaves if l.name in ref_species]
             if cands:
                 break
             cand_node = cand_node.parent
@@ -287,7 +348,8 @@ def classify_tree_nearest(tree_file, query_ids, species_map):
 
 
 def build_species_map(manifest_csv, classified_tsv=None):
-    """从 manifest.csv 构建 acc_base→species 映射；manifest 缺失时回退到 classified TSV。"""
+    """Build an acc_base -> species map from manifest.csv; fall back to the
+    classified TSV when the manifest is missing."""
     species_map = {}
     if manifest_csv is not None and Path(manifest_csv).is_file():
         with Path(manifest_csv).open("r", encoding="utf-8-sig", newline="") as fh:
@@ -299,7 +361,11 @@ def build_species_map(manifest_csv, classified_tsv=None):
                 if len(mrow) > max(macc_i, msp_i):
                     acc = mrow[macc_i].strip()
                     if acc:
-                        species_map[acc] = mrow[msp_i].strip()
+                        sp = normalize_species(mrow[msp_i].strip())
+                        species_map[acc] = sp
+                        # Tree leaves carry no version suffix, so also store a
+                        # version-stripped key
+                        species_map[acc.split(".")[0]] = sp
         return species_map
     if classified_tsv is None or not Path(classified_tsv).is_file():
         return species_map
@@ -327,7 +393,8 @@ def discover(vmr_dir, sample=""):
 
 
 def extract_sample(sample, classified, cfg, args):
-    """提取单个样本的 L 蛋白（每 contig 取最佳 RdRp），写带样本名前缀的 query fasta。"""
+    """Extract one sample's L proteins (best RdRp per contig) and write the
+    query FASTA with a sample-name prefix on every header."""
     project = Path(cfg.get("project_dir", "."))
     paths = cfg.get("paths", {})
     results = Path(paths.get("results_dir", project / "results"))
@@ -339,7 +406,7 @@ def extract_sample(sample, classified, cfg, args):
 
     header, rows = parse_table(classified)
     if len(header) < 4:
-        raise ValueError("TSV 至少需要 4 列")
+        raise ValueError("the TSV needs at least 4 columns")
     id_i, l_i = 0, 3
     targets = [r for r in rows if len(r) > l_i and r[l_i].strip()]
 
@@ -356,12 +423,20 @@ def extract_sample(sample, classified, cfg, args):
     ids_file.write_text("\n".join(ids) + "\n", encoding="utf-8")
     query_faa = out_dir / f"{sample}.l_proteins.faa"
     pattern = "(?:" + "|".join(re.escape(seq_id) for seq_id in ids) + ")_[0-9]+"
-    seqkit = [software(cfg, "seqkit", "seqkit"), "grep", "-n", "-r", "-p", pattern, str(protein_faa)] + extra(cfg, "vmr_merge_cluster", "seqkit_grep_extra_args")
+    seqkit = conda_run(cfg, software(cfg, "seqkit", "seqkit"), "grep", "-n", "-r", "-p", pattern, str(protein_faa)) + extra(cfg, "vmr_merge_cluster", "seqkit_grep_extra_args")
     code = run(seqkit, logs / "seqkit.log", args.dry_run, query_faa)
     if code:
         raise RuntimeError("seqkit failed")
+    # Short fragments: no L-segment contig yielded a prodigal protein
+    # (prodigal predicted no ORF), so skip tree building
+    if not args.dry_run:
+        has_query = query_faa.is_file() and any(
+            line.startswith(">") for line in query_faa.read_text(encoding="utf-8", errors="ignore").splitlines())
+        if not has_query:
+            return {"sample": sample, "classified": classified, "header": header,
+                    "rows": rows, "selected": {}, "prefixed_fa": None}
     diamond_tsv = out_dir / f"{sample}.vmr_l.diamond.tsv"
-    dcmd = [software(cfg, "diamond", "diamond"), "blastp", "--threads", str(cfg.get("threads", 32)), "-d", str(diamond_db), "-q", str(query_faa), "-o", str(diamond_tsv), "--evalue", value(cfg, "diamond", "evalue", "0.00001"), "--max-target-seqs", value(cfg, "diamond", "max_target_seqs", "1"), "--outfmt", "6", "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "--header"]
+    dcmd = conda_run(cfg, software(cfg, "diamond", "diamond"), "blastp", "--threads", str(cfg.get("threads", 32)), "-d", str(diamond_db), "-q", str(query_faa), "-o", str(diamond_tsv), "--evalue", value(cfg, "diamond", "evalue", "0.00001"), "--max-target-seqs", value(cfg, "diamond", "max_target_seqs", "1"), "--outfmt", "6", "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "--header")
     code = run(dcmd, logs / "diamond.log", args.dry_run)
     if code:
         raise RuntimeError("diamond failed")
@@ -373,7 +448,7 @@ def extract_sample(sample, classified, cfg, args):
     selected = {}
     for qid, hit in hits.items():
         selected[qid] = hit
-    # 按 contig 分组，取每个 contig 最高分的一条 RdRp
+    # Group by contig and keep the highest-scoring RdRp per contig
     contig_groups = {}
     for prot_id, hit in selected.items():
         mat = re.match(r"(.*)_\d+$", prot_id)
@@ -387,8 +462,8 @@ def extract_sample(sample, classified, cfg, args):
     selected = final_selected
 
     seq_ids = set(selected)
-    selected_faa = out_dir / f"{sample}.rdrp.faa"          # 原 id（每样本一份）
-    prefixed_fa = out_dir / f"{sample}.rdrp.prefixed.fa"   # 带样本名前缀（用于合并建树）
+    selected_faa = out_dir / f"{sample}.rdrp.faa"          # original ids, one file per sample
+    prefixed_fa = out_dir / f"{sample}.rdrp.prefixed.fa"   # sample-prefixed, for the combined tree
     with query_faa.open(encoding="utf-8", errors="ignore") as src, \
          selected_faa.open("w", encoding="utf-8") as dst, \
          prefixed_fa.open("w", encoding="utf-8") as pdst:
@@ -409,25 +484,49 @@ def extract_sample(sample, classified, cfg, args):
 
 
 def build_combined_tree(cfg, args, combined_query, all_dir, ref):
-    """用 73 参考 + 合并 query 建一棵树，返回 treefile 路径。"""
+    """Build one tree from the references plus the combined queries and return
+    the treefile path."""
     logs = all_dir / "logs"
     combined = all_dir / "tree_input.fa"
     combined.write_text(ref.read_text(encoding="utf-8") + combined_query.read_text(encoding="utf-8"), encoding="utf-8")
     aln = all_dir / "tree_aln.fa"
-    code = run([software(cfg, "mafft", "mafft"), "--thread", str(cfg.get("threads", 32)), "--" + value(cfg, "mafft", "preset", "auto"), str(combined)], logs / "mafft.log", False, aln)
+    code = run(conda_run(cfg, software(cfg, "mafft", "mafft"), "--thread", str(cfg.get("threads", 32)), "--" + value(cfg, "mafft", "preset", "auto"), str(combined)), logs / "mafft.log", False, aln)
     if code: raise RuntimeError("mafft failed")
     trimmed = all_dir / "tree_trim.fa"
-    code = run([software(cfg, "trimal", "trimal"), "-in", str(aln), "-out", str(trimmed), "-" + value(cfg, "trimal", "method", "automated1"), "-" + value(cfg, "trimal", "out_format", "fasta")], logs / "trimal.log")
+    code = run(conda_run(cfg, software(cfg, "trimal", "trimal"), "-in", str(aln), "-out", str(trimmed), "-" + value(cfg, "trimal", "method", "automated1"), "-" + value(cfg, "trimal", "out_format", "fasta")), logs / "trimal.log")
     if code: raise RuntimeError("trimal failed")
     prefix = all_dir / "tree_true_result"
-    iq = [software(cfg, "iqtree3", "iqtree3"), "-s", str(trimmed), "-m", value(cfg, "iqtree3", "model", "MFP"), "-B", value(cfg, "iqtree3", "bootstrap", "1000"), "-T", str(cfg.get("threads", 32)), "-pre", str(prefix)]
+    ckp = Path(str(prefix) + ".ckp.gz")
+    # Checkpoint handling: IQ-TREE resumes automatically when it finds a
+    # matching .ckp.gz, skipping ModelFinder and completed iterations.
+    # But once the alignment changes (a different reference set, say), the old
+    # checkpoint no longer applies and must be deleted, otherwise the previous
+    # search state is silently reused.
+    stamp = all_dir / "tree_input.md5"
+    md5_now = hashlib.md5(combined.read_bytes()).hexdigest()
+    if ckp.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8").strip() != md5_now:
+        print(json.dumps({"iqtree": "alignment changed, removing the old checkpoint",
+                          "ckp": str(ckp)}, ensure_ascii=False))
+        ckp.unlink()
+    stamp.write_text(md5_now + "\n", encoding="utf-8")
+    resume = ckp.is_file()
+    # Leave the IQ-TREE thread count on AUTO: with a limited number of
+    # sequences and alignment columns, too many threads add OpenMP
+    # synchronisation cost and cross-NUMA contention, which slows the run down
+    # substantially (the original -T 192 produced 238 threading warnings).
+    iq = conda_run(cfg, software(cfg, "iqtree3", "iqtree3"), "-s", str(trimmed), "-m", value(cfg, "iqtree3", "model", "MFP"), "-B", value(cfg, "iqtree3", "bootstrap", "1000"), "-T", "64", "-pre", str(prefix))
+    # With a usable checkpoint, omit -redo so IQ-TREE continues where it left
+    # off; otherwise -redo starts from scratch.
+    if not resume:
+        iq.append("-redo")
     code = run(iq, logs / "iqtree.log")
     if code: raise RuntimeError("iqtree3 failed")
     return Path(str(prefix) + ".treefile")
 
 
 def classify_sample(data, classifications):
-    """用共享树对单个样本分类，写回 TSV（去掉样本名前缀映射回原 id）。"""
+    """Classify one sample against the shared tree and write the result back
+    into its TSV, mapping the sample prefix back to the original id."""
     sample = data["sample"]
     classified = data["classified"]
     header = data["header"]
@@ -438,14 +537,18 @@ def classify_sample(data, classifications):
                             "tree_position", "tree_bootstrap", "tree_nn_sseqid", "tree_nn_distance"]
     if not selected:
         for r in rows:
-            r.extend(["", "", "", "", "", ""])
+            r.extend(["fragment, unclassified", "fragment", "", "", "", ""])
         write_table(classified, out_header, rows)
         return
 
     for r in rows:
         rid = r[0]
-        qid = next((k for k in selected if re.sub(r"_\d+$", "", k) == rid), None)
-        prefixed = f"{sample}_{qid}" if qid else None
+        qid = next((k for k in selected if strip_prodigal_suffix(k) == rid), None)
+        if qid is None:
+            # Short fragment: prodigal predicted no protein, not in the tree.
+            r.extend(["fragment, unclassified", "fragment", "", "", "", ""])
+            continue
+        prefixed = f"{sample}_{qid}"
         tr = classifications.get(prefixed) if prefixed else None
         if tr and tr.get("species"):
             support = tr.get("support")
@@ -464,7 +567,8 @@ def main():
     ap.add_argument("-s", "--sample", default="")
     ap.add_argument("-c", "--config", required=True)
     ap.add_argument("--manifest", default=None,
-                    help="manifest.csv 路径；默认取 config 里 project_dir/DB/manifest.csv")
+                    help="path to manifest.csv; defaults to project_dir/DB/manifest.csv "
+                         "from the configuration")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     cfg = read_yaml(args.config)
@@ -473,14 +577,14 @@ def main():
     if not args.manifest:
         args.manifest = str(project / "DB" / "manifest.csv")
     results = Path(paths.get("results_dir", project / "results"))
-    vmr = Path(paths.get("diamond_vmr_dir", results / "06_diamond_vmr"))
+    vmr = results / "06_diamond_vmr"
     files = discover(vmr, args.sample)
     if not files:
         print("no classified TSV found", file=sys.stderr); return 2
 
     species_map = build_species_map(Path(args.manifest), None)
 
-    # Phase 1：逐样本提取 L 蛋白（写带样本名前缀的 query）
+    # Phase 1: extract the L proteins sample by sample, writing sample-prefixed queries
     samples_data = []
     for sample, path in files.items():
         try:
@@ -492,7 +596,7 @@ def main():
         print(json.dumps({"status": "dry-run", "samples": [d["sample"] for d in samples_data]}, ensure_ascii=False))
         return 0
 
-    # Phase 2：合并所有样本 query，建一棵树
+    # Phase 2: merge the queries from all samples and build one tree
     all_dir = results / "07_tree" / "_all"
     all_dir.mkdir(parents=True, exist_ok=True)
     combined_query = all_dir / "combined_query.fa"
@@ -500,7 +604,7 @@ def main():
         for d in samples_data:
             if d["prefixed_fa"] is not None and d["prefixed_fa"].is_file():
                 out.write(d["prefixed_fa"].read_text(encoding="utf-8"))
-    # 合并一份 l.fasta（带样本名前缀），放 results/00_results/l.fasta
+    # Also write a combined l.fasta (sample-prefixed) to results/00_results/l.fasta
     l_fasta = results / "00_results" / "l.fasta"
     l_fasta.parent.mkdir(parents=True, exist_ok=True)
     l_fasta.write_text(combined_query.read_text(encoding="utf-8"), encoding="utf-8")
@@ -510,9 +614,16 @@ def main():
         classifications = {}
     else:
         treefile = build_combined_tree(cfg, args, combined_query, all_dir, ref)
-        classifications = classify_tree_nearest(treefile, set(), species_map)
+        # Pass the query and reference lists explicitly instead of guessing from
+        # "does the name end in _<digits>". Unversioned reference accessions
+        # such as NC_055171 would otherwise be misread as queries.
+        query_leaf_ids = set(read_fasta_ids(combined_query))
+        ref_leaf_ids = set(read_fasta_ids(ref))
+        print(json.dumps({"leaf_ids": {"query": len(query_leaf_ids), "ref": len(ref_leaf_ids)}},
+                         ensure_ascii=False))
+        classifications = classify_tree_nearest(treefile, query_leaf_ids, species_map, ref_leaf_ids)
 
-    # Phase 3：逐样本用同一棵树分类写回
+    # Phase 3: classify each sample against the same tree and write the result back
     for d in samples_data:
         try:
             classify_sample(d, classifications)
@@ -521,7 +632,7 @@ def main():
         except Exception as exc:
             print(f"{d['sample']}: {exc}", file=sys.stderr); return 2
 
-    # 汇总所有样本成一个总表，输出到 00_results
+    # Aggregate every sample into one table and write it to 00_results
     tree_cols = ["final_classification", "classification_source",
                  "tree_position", "tree_bootstrap", "tree_nn_sseqid", "tree_nn_distance"]
     combined_header = None

@@ -2,27 +2,40 @@
 set -Eeuo pipefail
 
 # ============================================================
-# 汉坦病毒单样本预处理 + 组装流程
-# 流程: fastp → PRINSEQ++ → bowtie2(去rRNA) → MEGAHIT → Prodigal
+# Hantavirus single-sample pre-processing and assembly pipeline
+# Steps: fastp -> PRINSEQ++ -> bowtie2 (rRNA removal) -> MEGAHIT -> Prodigal
 #
-# 用法:
+# Usage:
 #   bash scripts/qc.sh -s <SAMPLE> [-c config.yaml] [--dry-run]
-#   bash scripts/qc.sh -c config.yaml [--dry-run]          (自动发现 data_dir 下所有样本)
+#   bash scripts/qc.sh -c config.yaml [--dry-run]          (auto-discover every sample in data_dir)
 #
-# 输出:
-#   默认写入 <project_dir>/results，可在 config.yaml 的 paths.results_dir 中指定
-#   <results_dir>/json/<SAMPLE>.qc.json   — 结构化结果（供下游 skill 衔接）
-#   <results_dir>/log/<SAMPLE>/           — 每步独立日志
-#   屏幕无输出，静默运行
+# Output:
+#   Written to <project_dir>/results by default; override with paths.results_dir in config.yaml
+#   <results_dir>/json/<SAMPLE>.qc.json   - structured result, consumed by downstream skills
+#   <results_dir>/log/<SAMPLE>/           - one log file per step
+#   Silent: nothing is printed to the screen
 #
-# 可选清理:
-#   config.yaml 设置 cleanup.intermediates: true 时，MEGAHIT 完成后删除
-#   前三步中间 fastq（fastp 的 html/json 质控报告保留）
+# Optional cleanup:
+#   With cleanup.intermediates: true, the intermediate FASTQs of the first
+#   three steps are deleted once MEGAHIT finishes (fastp html/json QC reports are kept)
 # ============================================================
 
-# ---------- 路径初始化 ----------
+# ---------- Path initialisation ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_CONFIG="$(cd "${SCRIPT_DIR}/.." && pwd)/config.yaml"
+# Default configuration: walk up from the script directory looking for config.yaml, so no absolute path is hard-coded across machines
+# Layout skills_new/<skill>/scripts/1-qc.sh -> yaml lives at skills_new/config.yaml (two levels up)
+# An explicit -c still wins
+DEFAULT_CONFIG="${SCRIPT_DIR}/config.yaml"
+for _dir in "${SCRIPT_DIR}" "$(dirname "${SCRIPT_DIR}")" "$(dirname "$(dirname "${SCRIPT_DIR}")")"; do
+    if [ -f "${_dir}/config.yaml" ]; then
+        DEFAULT_CONFIG="${_dir}/config.yaml"
+        break
+    fi
+done
+# Backwards compatibility: if config.yaml is absent, fall back to cell_submit-paper.yaml beside the script
+if [ ! -f "${DEFAULT_CONFIG}" ] && [ -f "${SCRIPT_DIR}/cell_submit-paper.yaml" ]; then
+    DEFAULT_CONFIG="${SCRIPT_DIR}/cell_submit-paper.yaml"
+fi
 PYTHON_BIN="${PYTHON:-python3}"
 
 SAMPLE=""
@@ -30,17 +43,17 @@ CONFIG_YAML="${CONFIG_YAML:-${DEFAULT_CONFIG}}"
 DRY_RUN="false"
 COMPLETED_STEPS=""
 
-# ---------- 帮助信息 ----------
+# ---------- Help ----------
 usage() {
     cat <<'EOF'
-用法:
-  bash scripts/qc.sh -s <样本名> [-c 配置文件] [--dry-run]
-  bash scripts/qc.sh <样本名>
-  bash scripts/qc.sh -c 配置文件 [--dry-run]          (自动发现 data_dir 下所有样本)
+Usage:
+    bash scripts/qc.sh -s <sample> [-c <config>] [--dry-run]
+    bash scripts/qc.sh <sample>
+    bash scripts/qc.sh -c <config> [--dry-run]          (auto-discover every sample in data_dir)
 EOF
 }
 
-# ---------- JSON 错误输出（写入文件，不打印到屏幕）----------
+# ---------- JSON error output (written to a file, never printed) ----------
 plain_json_error() {
     local sample="${1:-unknown}" message="$2" code="${3:-1}"
     local err_json="${JSON_DIR:-/tmp}/${sample}.qc.json"
@@ -50,7 +63,7 @@ plain_json_error() {
     exit "${code}"
 }
 
-# ---------- 参数解析 ----------
+# ---------- Argument parsing ----------
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -s|--sample) SAMPLE="${2:-}"; shift 2 ;;
@@ -59,22 +72,22 @@ while [ "$#" -gt 0 ]; do
         -h|--help)   usage; exit 0 ;;
         -*)
             usage >&2
-            plain_json_error "${SAMPLE:-unknown}" "未知选项: $1" 2
+            plain_json_error "${SAMPLE:-unknown}" "unknown option: $1" 2
             ;;
         *)
             if [ -z "${SAMPLE}" ]; then SAMPLE="$1"; shift
-            else usage >&2; plain_json_error "${SAMPLE}" "多余参数: $1" 2
+            else usage >&2; plain_json_error "${SAMPLE}" "unexpected argument: $1" 2
             fi
             ;;
     esac
 done
 
-# ---------- 前置检查 ----------
-command -v "${PYTHON_BIN}" >/dev/null 2>&1 || plain_json_error "${SAMPLE:-unknown}" "需要 python3 来解析 config.yaml" 127
-[ -f "${CONFIG_YAML}" ] || plain_json_error "${SAMPLE:-unknown}" "找不到配置文件: ${CONFIG_YAML}" 2
+# ---------- Preflight checks ----------
+command -v "${PYTHON_BIN}" >/dev/null 2>&1 || plain_json_error "${SAMPLE:-unknown}" "python3 is required to parse config.yaml" 127
+[ -f "${CONFIG_YAML}" ] || plain_json_error "${SAMPLE:-unknown}" "config file not found: ${CONFIG_YAML}" 2
 
 # ============================================================
-# 配置加载：从 config.yaml 读取所有参数，导出为 shell 变量
+# Configuration loading: read every parameter from config.yaml and export it as a shell variable
 # ============================================================
 load_config() {
     "${PYTHON_BIN}" - "$CONFIG_YAML" "$SAMPLE" <<'PY'
@@ -124,12 +137,12 @@ def emit(name, value):
 cfg = read_simple_yaml(cfg_path)
 project_dir = cfg.get("project_dir")
 if not project_dir:
-    raise SystemExit("ERROR: config.yaml 中必须设置 project_dir")
+    raise SystemExit("ERROR: project_dir must be set in config.yaml")
 
 paths = cfg.get("paths", {}) if isinstance(cfg.get("paths"), dict) else {}
 results_dir = paths.get("results_dir") or os.path.join(project_dir, "results")
 
-# --- 目录路径 ---
+# --- Directory paths ---
 emit("PROJECT_DIR", project_dir)
 emit("DATA_DIR", paths.get("data_dir") or os.path.join(project_dir, "data"))
 emit("RESULTS_DIR", results_dir)
@@ -141,12 +154,14 @@ emit("PRODIGAL_DIR", paths.get("prodigal_dir") or os.path.join(results_dir, "05_
 emit("LOG_DIR", paths.get("log_dir") or os.path.join(results_dir, "log", sample))
 emit("JSON_DIR", paths.get("json_dir") or os.path.join(results_dir, "json"))
 
-# --- 输入发现 ---
+# --- Input discovery ---
 emit("R1_SUFFIXES", get("input", "r1_suffixes", "_r1.fq.gz,_R1.fq.gz,_1.fastq.gz"))
 emit("R2_SUFFIXES", get("input", "r2_suffixes", "_r2.fq.gz,_R2.fq.gz,_2.fastq.gz"))
 
-# --- 线程 ---
+# --- Threads ---
 emit("THREADS_CFG", cfg.get("threads", "auto"))
+# --- Conda environment ---
+emit("CONDA_ENV", cfg.get("conda_env", "lpy-hanta-v2"))
 
 # --- fastp ---
 fp = lambda k, d: get("fastp", k, d)
@@ -175,7 +190,7 @@ emit("PRINSEQ_ENTROPY", ps("lc_entropy", "0.5"))
 emit("PRINSEQ_DUST", ps("lc_dust", "0.5"))
 emit("PRINSEQ_EXTRA_ARGS", ps("extra_args", ""))
 
-# --- bowtie2（替换 SortMeRNA）---
+# --- bowtie2 (replaces SortMeRNA) ---
 bt2 = lambda k, d: get("bowtie2", k, d)
 emit("BOWTIE2_REF_DIR", bt2("ref_dir", os.path.join(project_dir, "DB", "sortmerna")))
 emit("BOWTIE2_INDEX", os.path.join(bt2("ref_dir", os.path.join(project_dir, "DB", "sortmerna")), bt2("index_prefix", "rrna_index")))
@@ -194,20 +209,20 @@ emit("PRODIGAL_MODE", pd("mode", "meta"))
 emit("PRODIGAL_MIN_AA", pd("min_protein_aa", "200"))
 emit("PRODIGAL_EXTRA_ARGS", pd("extra_args", ""))
 
-# --- 中间文件清理（MEGAHIT 完成后删除前三步 fastq；默认关闭）---
+# --- Intermediate cleanup (delete the first three steps' FASTQs after MEGAHIT; off by default) ---
 cl = lambda k, d: get("cleanup", k, d)
 emit("CLEANUP_INTERMEDIATES", cl("intermediates", "false"))
 PY
 }
 
-CONFIG_ENV="$(load_config)" || plain_json_error "${SAMPLE:-unknown}" "解析 config.yaml 失败: ${CONFIG_YAML}" 2
+CONFIG_ENV="$(load_config)" || plain_json_error "${SAMPLE:-unknown}" "failed to parse config.yaml: ${CONFIG_YAML}" 2
 eval "${CONFIG_ENV}"
 
 # ============================================================
-# 线程与并行度计算（提前到这里，供多样本并行调度使用）
+# Thread and parallelism calculation (moved up here so the multi-sample scheduler can use it)
 # ============================================================
 
-# 自动检测可用线程数（读 config.yaml 的 threads，auto 则自动探测）
+# Auto-detect available threads (read threads from config.yaml; 'auto' probes the machine)
 detect_threads() {
     if [ "${THREADS_CFG}" != "auto" ] && [ -n "${THREADS_CFG}" ]; then
         printf '%s\n' "${THREADS_CFG}"
@@ -222,11 +237,11 @@ detect_threads() {
 
 THREADS="$(detect_threads)"
 
-# 每个进程（软件）的线程数：fastp 单进程上限 16，其它软件与之对齐，
-# 保证多样本并行时总核数不超过配置值
+# Threads per process: fastp caps at 16 per process, the other tools are aligned with it
+# so the total core count never exceeds the configured value when samples run in parallel
 PER_PROC_THREADS=16
-# 并行样本数 = 总线程数 / 每进程线程数（向下取整，至少 1）
-# 预防总线程数不是 16 的倍数：余数核闲置，绝不超订
+# Parallel samples = total threads / threads per process (floor, at least 1)
+# Guards against a total that is not a multiple of 16: the remainder cores stay idle, never oversubscribed
 if [ "${THREADS}" -gt "${PER_PROC_THREADS}" ]; then
     PARALLEL=$(( THREADS / PER_PROC_THREADS ))
 else
@@ -236,7 +251,7 @@ fi
 [ "${PARALLEL}" -ge 1 ] || PARALLEL=1
 
 # ============================================================
-# 自动发现样本（未指定 -s 时扫描 data_dir）
+# Auto-discover samples (scan data_dir when -s is not given)
 # ============================================================
 if [ -z "${SAMPLE}" ]; then
     SAMPLES_FOUND=""
@@ -248,16 +263,16 @@ if [ -z "${SAMPLE}" ]; then
             SAMPLES_FOUND="${SAMPLES_FOUND}${SAMPLES_FOUND:+ }${_bn}"
         done
     done
-    # 去重
+    # Deduplicate
     SAMPLES_FOUND="$(printf '%s\n' ${SAMPLES_FOUND} | sort -u | tr '\n' ' ')"
     SAMPLES_FOUND="${SAMPLES_FOUND% }"
 
     if [ -z "${SAMPLES_FOUND}" ]; then
         usage >&2
-        plain_json_error "unknown" "未指定 -s 且在 ${DATA_DIR} 中未自动发现任何样本（后缀: ${R1_SUFFIXES}）" 2
+        plain_json_error "unknown" "no sample could be auto-discovered in ${DATA_DIR} and -s was not given (suffixes: ${R1_SUFFIXES})" 2
     fi
 
-    printf '[%s] 自动发现 %s 个样本，并行 %s 路（每样本每软件 %s 线程）\n' \
+    printf '[%s] auto-discovered %s sample(s), %s in parallel (%s threads per sample per tool)\n' \
         "$(date '+%F %T')" "${SAMPLES_FOUND}" "${PARALLEL}" "${PER_PROC_THREADS}" >&2
     EXIT_TOTAL=0
     RUNNING=0
@@ -281,16 +296,16 @@ if [ -z "${SAMPLE}" ]; then
 fi
 
 # ============================================================
-# 工具函数
+# Utility functions
 # ============================================================
 
 RESULT_JSON="${JSON_DIR}/${SAMPLE}.qc.json"
 
-# 一次性创建所有输出目录
+# Create every output directory in one pass
 mkdir -p "${FASTP_DIR}" "${PRINSEQ_DIR}" "${CLEAN_DIR}" \
          "${MEGAHIT_DIR}" "${PRODIGAL_DIR}" "${LOG_DIR}" "${JSON_DIR}"
 
-# ---------- JSON 结果写入（只写文件，不打印到屏幕）----------
+# ---------- JSON result writing (file only, never printed) ----------
 write_json() {
     local status="$1" failed_step="${2:-}" message="${3:-}" exit_code="${4:-0}"
     STATUS="${status}" FAILED_STEP="${failed_step}" MESSAGE="${message}" EXIT_CODE="${exit_code}" \
@@ -343,29 +358,29 @@ payload = {
 text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 with open(os.environ["RESULT_JSON"], "w", encoding="utf-8") as f:
     f.write(text + "\n")
-# 不打印到 stdout，保持静默
+# Never printed to stdout
 PY
 }
 
-# 失败时调用：写入错误 JSON 并退出
+# Called on failure: write an error JSON and exit
 fail_step() {
     local step="$1" code="$2" message="$3"
     write_json "failed" "${step}" "${message}" "${code}"
     exit "${code}"
 }
 
-# 写入管道日志
+# Append to the pipeline log
 log_msg() {
     printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "${LOG_DIR}/pipeline.log"
 }
 
-# 检查必需工具是否存在
+# Check that a required tool exists
 require_tool() {
     local tool="$1"
-    command -v "${tool}" >/dev/null 2>&1 || fail_step "preflight" 127 "未找到必需工具: ${tool}"
+    command -v "${tool}" >/dev/null 2>&1 || fail_step "preflight" 127 "required tool not found: ${tool}"
 }
 
-# 追加额外参数（空格分割）
+# Append extra arguments (split on whitespace)
 append_extra_args() {
     local extra="$1"
     [ -n "${extra}" ] || return 0
@@ -373,13 +388,13 @@ append_extra_args() {
     CMD+=("${EXTRA_ARGV[@]}")
 }
 
-# 执行一个步骤：记录日志 → 运行命令 → 检查退出码
+# Run one step: log the command, run it, then check the exit code
 run_step() {
     local step="$1"; shift
     local log_file="${LOG_DIR}/${step}.log"
     log_msg "START ${step}"
 
-    # 记录命令到日志
+    # Record the command in the log
     {
         printf '[%s] CMD:' "$(date '+%F %T')"
         printf ' %q' "$@"
@@ -387,15 +402,15 @@ run_step() {
     } > "${log_file}"
 
     if [ "${DRY_RUN}" = "true" ]; then
-        printf '[%s] DRY_RUN 跳过执行\n' "$(date '+%F %T')" >> "${log_file}"
+        printf '[%s] DRY_RUN: skipping execution\n' "$(date '+%F %T')" >> "${log_file}"
     else
         set +e
         "$@" >> "${log_file}" 2>&1
         local code=$?
         set -e
         if [ "${code}" -ne 0 ]; then
-            log_msg "FAIL ${step} exit=${code}; 日志: ${log_file}"
-            fail_step "${step}" "${code}" "${step} 执行失败; 详见 ${log_file}"
+            log_msg "FAIL ${step} exit=${code}; log: ${log_file}"
+            fail_step "${step}" "${code}" "${step} failed; see ${log_file}"
         fi
     fi
 
@@ -403,13 +418,13 @@ run_step() {
     log_msg "DONE ${step}"
 }
 
-# 在数据目录中查找样本的双端 FASTQ 文件
+# Locate the paired-end FASTQ files of a sample inside the data directory
 find_reads() {
     local r1_suffix r2_suffix candidate_r1 candidate_r2
     IFS=',' read -r -a R1_ARR <<< "${R1_SUFFIXES}"
     IFS=',' read -r -a R2_ARR <<< "${R2_SUFFIXES}"
     [ "${#R1_ARR[@]}" -eq "${#R2_ARR[@]}" ] || \
-        fail_step "input" 2 "r1_suffixes 和 r2_suffixes 条目数必须一致"
+        fail_step "input" 2 "r1_suffixes and r2_suffixes must have the same number of entries"
 
     for idx in "${!R1_ARR[@]}"; do
         r1_suffix="${R1_ARR[$idx]}"
@@ -422,10 +437,10 @@ find_reads() {
             return 0
         fi
     done
-    fail_step "input" 2 "在 ${DATA_DIR} 中未找到样本 ${SAMPLE} 的双端 FASTQ 文件"
+    fail_step "input" 2 "no paired-end FASTQ files found for sample ${SAMPLE} in ${DATA_DIR}"
 }
 
-# 解析工具输出的双端文件（按常见命名模式匹配）
+# Parse the paired-end outputs of a tool (matched against the common naming patterns)
 resolve_pair() {
     local prefix="$1" label="$2"
     local pairs=(
@@ -462,10 +477,10 @@ resolve_pair() {
             return 0
         fi
     done
-    fail_step "${label}" 2 "无法解析双端输出文件: ${prefix}"
+    fail_step "${label}" 2 "cannot parse paired-end output files: ${prefix}"
 }
 
-# 按最小氨基酸长度过滤 Prodigal 输出的蛋白 FASTA
+# Filter the Prodigal protein FASTA by minimum amino-acid length
 filter_faa_by_length() {
     local input="$1" output="$2" min_aa="$3"
     "${PYTHON_BIN}" - "$input" "$output" "$min_aa" <<'PY'
@@ -499,31 +514,28 @@ PY
 }
 
 # ============================================================
-# 预检查：验证必需工具
+# Preflight: verify the required tools
 # ============================================================
 if [ "${DRY_RUN}" != "true" ]; then
-    require_tool fastp
-    require_tool "prinseq++"
-    require_tool bowtie2
-    require_tool megahit
-    require_tool prodigal
+    command -v conda >/dev/null 2>&1 || fail_step "preflight" 127 "conda command not found"
+    conda run -n "${CONDA_ENV}" true >/dev/null 2>&1 || fail_step "preflight" 127 "conda environment ${CONDA_ENV} is not usable"
 fi
 
 # ============================================================
-# 查找输入文件
+# Locate the input files
 # ============================================================
 find_reads
-log_msg "样本=${SAMPLE} 配置=${CONFIG_YAML} 每进程线程=${PER_PROC_THREADS} 总线程=${THREADS}"
-log_msg "输入 R1=${RAW_R1} R2=${RAW_R2}"
+log_msg "sample=${SAMPLE} config=${CONFIG_YAML} threads_per_process=${PER_PROC_THREADS} total_threads=${THREADS}"
+log_msg "input R1=${RAW_R1} R2=${RAW_R2}"
 
 # ============================================================
-# 步骤 1: fastp — 质量修剪 + 接头处理
+# Step 1: fastp - quality trimming and adapter removal
 # ============================================================
 FASTP_R1="${FASTP_DIR}/${SAMPLE}_fastp_R1.fq.gz"
 FASTP_R2="${FASTP_DIR}/${SAMPLE}_fastp_R2.fq.gz"
-CMD=(fastp -i "${RAW_R1}" -I "${RAW_R2}" -o "${FASTP_R1}" -O "${FASTP_R2}")
+CMD=(conda run -n "${CONDA_ENV}" fastp -i "${RAW_R1}" -I "${RAW_R2}" -o "${FASTP_R1}" -O "${FASTP_R2}")
 
-# 接头/修剪参数
+# Adapter / trimming parameters
 [ "${FASTP_DISABLE_ADAPTER}" = "true" ] && CMD+=(--disable_adapter_trimming)
 [ "${FASTP_DISABLE_ADAPTER}" != "true" ] && [ "${FASTP_DETECT_ADAPTER}" = "true" ] && CMD+=(--detect_adapter_for_pe)
 [ "${FASTP_CUT_FRONT}" = "true" ] && CMD+=(--cut_front --cut_front_window_size "${FASTP_FRONT_WINDOW}" --cut_front_mean_quality "${FASTP_FRONT_QUAL}")
@@ -537,10 +549,10 @@ append_extra_args "${FASTP_EXTRA_ARGS}"
 run_step fastp "${CMD[@]}"
 
 # ============================================================
-# 步骤 2: PRINSEQ++ — 低复杂度序列过滤（PDF p23）
+# Step 2: PRINSEQ++ - low-complexity filtering (PDF p23)
 # ============================================================
 PRINSEQ_PREFIX="${PRINSEQ_DIR}/${SAMPLE}_prinseq"
-CMD=(prinseq++
+CMD=(conda run -n "${CONDA_ENV}" prinseq++
     -fastq "${FASTP_R1}" -fastq2 "${FASTP_R2}"
     -out_name "${PRINSEQ_PREFIX}"
     -lc_entropy "${PRINSEQ_ENTROPY}" -lc_dust "${PRINSEQ_DUST}"
@@ -552,14 +564,14 @@ PRINSEQ_R1="${RESOLVED_R1}"
 PRINSEQ_R2="${RESOLVED_R2}"
 
 # ============================================================
-# 步骤 3: bowtie2 — 去除 rRNA（替换 SortMeRNA；PDF p25）
-#   将 reads 比对到 rRNA 参考索引，提取未比对（非 rRNA）reads
+# Step 3: bowtie2 - rRNA removal (replaces SortMeRNA; PDF p25)
+#   Align reads to the rRNA index and keep the reads that did not align (non-rRNA)
 # ============================================================
 CLEAN_PREFIX="${CLEAN_DIR}/${SAMPLE}_clean_non_rRNA"
 CLEAN_R1="${CLEAN_PREFIX}_R1.fq.gz"
 CLEAN_R2="${CLEAN_PREFIX}_R2.fq.gz"
 
-CMD=(bowtie2
+CMD=(conda run -n "${CONDA_ENV}" bowtie2
     -x "${BOWTIE2_INDEX}"
     -1 "${PRINSEQ_R1}" -2 "${PRINSEQ_R2}"
     --un-conc-gz "${CLEAN_PREFIX}"
@@ -570,38 +582,44 @@ CMD=(bowtie2
 append_extra_args "${BOWTIE2_EXTRA_ARGS}"
 run_step bowtie2 "${CMD[@]}"
 
-# bowtie2 --un-conc-gz 输出为 <prefix>.1 和 <prefix>.2（gzipped），重命名为标准双端命名
+# bowtie2 --un-conc-gz writes <prefix>.1 and <prefix>.2 (gzipped); rename them to the standard paired-end names
 if [ "${DRY_RUN}" != "true" ]; then
     if [ -f "${CLEAN_PREFIX}.1" ] && [ -f "${CLEAN_PREFIX}.2" ]; then
         mv "${CLEAN_PREFIX}.1" "${CLEAN_R1}"
         mv "${CLEAN_PREFIX}.2" "${CLEAN_R2}"
     else
-        fail_step bowtie2 1 "bowtie2 未产生非 rRNA reads 输出"
+        fail_step bowtie2 1 "bowtie2 produced no non-rRNA read output"
     fi
     [ -s "${CLEAN_R1}" ] && [ -s "${CLEAN_R2}" ] || \
-        fail_step bowtie2 1 "去 rRNA 后无有效 reads 剩余"
+        fail_step bowtie2 1 "no usable reads remain after rRNA removal"
 fi
 
-log_msg "bowtie2 去 rRNA 完成: ${CLEAN_R1} / ${CLEAN_R2}"
+log_msg "bowtie2 rRNA removal done: ${CLEAN_R1} / ${CLEAN_R2}"
 
 # ============================================================
-# 步骤 4: MEGAHIT — 从头组装（PDF p23-24: 默认参数）
+# Step 4: MEGAHIT - de novo assembly (PDF p23-24: default parameters)
 # ============================================================
 MEGAHIT_OUT="${MEGAHIT_DIR}/${SAMPLE}"
 
-# 处理已存在的输出目录
+# Handle an existing output directory
+# Note: deletion happens only on a real run. --dry-run must keep the disk
+#       read-only, otherwise a single rehearsal permanently destroys existing assemblies.
 if [ -d "${MEGAHIT_OUT}" ]; then
     if [ "${MEGAHIT_OVERWRITE}" = "true" ]; then
-        case "${MEGAHIT_OUT}" in
-            "${MEGAHIT_DIR}/${SAMPLE}") rm -rf -- "${MEGAHIT_OUT}" ;;
-            *) fail_step megahit 2 "拒绝删除非预期的 MEGAHIT 目录: ${MEGAHIT_OUT}" ;;
-        esac
+        if [ "${DRY_RUN}" = "true" ]; then
+            log_msg "DRY-RUN: keeping the existing MEGAHIT directory (a real run would overwrite it): ${MEGAHIT_OUT}"
+        else
+            case "${MEGAHIT_OUT}" in
+                "${MEGAHIT_DIR}/${SAMPLE}") rm -rf -- "${MEGAHIT_OUT}" ;;
+                *) fail_step megahit 2 "refusing to delete an unexpected MEGAHIT directory: ${MEGAHIT_OUT}" ;;
+            esac
+        fi
     else
-        fail_step megahit 2 "MEGAHIT 输出已存在; 设置 megahit.overwrite: true 或手动删除 ${MEGAHIT_OUT}"
+        fail_step megahit 2 "MEGAHIT output already exists; set megahit.overwrite: true or delete ${MEGAHIT_OUT} manually"
     fi
 fi
 
-CMD=(megahit
+CMD=(conda run -n "${CONDA_ENV}" megahit
     -1 "${CLEAN_R1}" -2 "${CLEAN_R2}"
     -o "${MEGAHIT_OUT}"
     --min-contig-len "${MEGAHIT_MIN_CONTIG_LEN}"
@@ -609,37 +627,37 @@ CMD=(megahit
 append_extra_args "${MEGAHIT_EXTRA_ARGS}"
 run_step megahit "${CMD[@]}"
 
-# 验证组装结果
+# Verify the assembly
 CONTIGS_FASTA="${MEGAHIT_OUT}/final.contigs.fa"
 if [ "${DRY_RUN}" != "true" ]; then
-    [ -s "${CONTIGS_FASTA}" ] || fail_step megahit 1 "MEGAHIT 未产生 final.contigs.fa"
+    [ -s "${CONTIGS_FASTA}" ] || fail_step megahit 1 "MEGAHIT produced no final.contigs.fa"
 fi
 
 # ============================================================
-# 可选清理：MEGAHIT 完成后删除前三步中间 fastq
-#   开关: config.yaml 设置 cleanup.intermediates: true（默认 false）
-#   说明: Prodigal 仅依赖 MEGAHIT 的 final.contigs.fa，删除安全；
-#         fastp 的 html/json 质控报告保留
+# Optional cleanup: delete the first three steps' intermediate FASTQs after MEGAHIT
+#   Switch: cleanup.intermediates: true in config.yaml (default false)
+#   Rationale: Prodigal only needs MEGAHIT's final.contigs.fa, so deletion is safe;
+#              the fastp html/json QC reports are kept
 # ============================================================
 if [ "${CLEANUP_INTERMEDIATES}" = "true" ] && [ "${DRY_RUN}" != "true" ]; then
     rm -f -- "${FASTP_R1}" "${FASTP_R2}"
     rm -f -- "${PRINSEQ_PREFIX}"*
     rm -f -- "${CLEAN_R1}" "${CLEAN_R2}"
-    # 清空路径，避免 JSON outputs 中记录已删除文件
+    # Clear the paths so the JSON outputs do not point at deleted files
     FASTP_R1=""; FASTP_R2=""
     PRINSEQ_R1=""; PRINSEQ_R2=""
     CLEAN_R1=""; CLEAN_R2=""
-    log_msg "中间文件清理完成（cleanup.intermediates=true）"
+    log_msg "intermediate cleanup done (cleanup.intermediates=true)"
 fi
 
 # ============================================================
-# 步骤 5: Prodigal — ORF 预测（PDF p24: ≥200 aa 蛋白保留）
+# Step 5: Prodigal - ORF prediction (PDF p24: keep proteins of 200 aa or more)
 # ============================================================
 PROTEIN_FAA="${PRODIGAL_DIR}/${SAMPLE}_final.contigs_proteins.faa"
 PROTEIN_FFN="${PRODIGAL_DIR}/${SAMPLE}_final.contigs_genes.ffn"
 PRODIGAL_GFF="${PRODIGAL_DIR}/${SAMPLE}_final.contigs.gff"
 
-CMD=(prodigal
+CMD=(conda run -n "${CONDA_ENV}" prodigal
     -i "${CONTIGS_FASTA}"
     -a "${PROTEIN_FAA}" -d "${PROTEIN_FFN}" -o "${PRODIGAL_GFF}"
     -f gff -p "${PRODIGAL_MODE}" -q)
@@ -647,9 +665,9 @@ append_extra_args "${PRODIGAL_EXTRA_ARGS}"
 run_step prodigal "${CMD[@]}"
 
 [ "${DRY_RUN}" = "true" ] || [ -s "${PROTEIN_FAA}" ] || \
-    fail_step prodigal 1 "Prodigal 未产生蛋白序列"
+    fail_step prodigal 1 "Prodigal produced no protein sequences"
 
-# 过滤 ≥200 aa 的蛋白（PDF: 保留 ≥200 氨基酸残基的 ORF）
+# Keep proteins of 200 aa or more (PDF: retain ORFs of at least 200 residues)
 FILTERED_FAA="${PRODIGAL_DIR}/${SAMPLE}_final.contigs_proteins.min${PRODIGAL_MIN_AA}aa.faa"
 if [ "${DRY_RUN}" != "true" ]; then
     filter_faa_by_length "${PROTEIN_FAA}" "${FILTERED_FAA}" "${PRODIGAL_MIN_AA}" \
@@ -657,6 +675,6 @@ if [ "${DRY_RUN}" != "true" ]; then
 fi
 
 # ============================================================
-# 完成：写入成功 JSON，管道结束
+# Done: write the success JSON and end the pipeline
 # ============================================================
-write_json "success" "" "流程完成" 0
+write_json "success" "" "pipeline complete" 0

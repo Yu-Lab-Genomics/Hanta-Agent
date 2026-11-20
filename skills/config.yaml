@@ -25,8 +25,7 @@ software:
 # --- 输入输出目录；下游脚本优先读取这里的 results_dir ---
 paths:
   data_dir: /workspace/liangpeiyu/project/hantaKG_Agent/data_cell_2/sra
-  results_dir: /workspace/liangpeiyu/project/hantaKG_Agent/results_cell_score
-  diamond_vmr_dir: /workspace/liangpeiyu/project/hantaKG_Agent/results_cell_score/06_diamond_vmr
+  results_dir: /workspace/liangpeiyu/project/hantaKG_Agent/results_cell_paper/
 
 # --- 输入文件后缀（自动发现数据目录下的双端测序文件）---
 input:
@@ -63,8 +62,6 @@ prinseq:
 bowtie2:
   # 参考序列目录（沿用原 SortMeRNA 数据库 fasta 文件建索引）
   ref_dir:  /workspace/liangpeiyu/project/hantaKG_Agent/DB/sortmerna
-  # 合并后建索引的参考 fasta 文件列表
-  refs: smr_v4.3_default_db.fasta,smr_v4.3_fast_db.fasta,smr_v4.3_sensitive_db_rfam_seeds.fasta,smr_v4.3_sensitive_db.fasta
   # bowtie2 索引前缀（自动生成在 ref_dir 下）
   index_prefix: rrna_index
   # 比对灵敏度预设：very-fast, fast, sensitive, very-sensitive
@@ -104,11 +101,6 @@ iqtree3:
   model: MFP
   bootstrap: 1000
   alrt: 1000
-  identity: 90        # 分类时氨基酸一致性阈值(%)，>=此值判为同种
-
-# --- 合并过滤参数 ---
-merge:
-  pident_min: 50.0
 
 # --- 系统发育分析参数 ---
 phylogeny:
@@ -130,3 +122,24 @@ vmr_merge_cluster:
   cd_hit_est_M: 0
   cd_hit_est_T:
   cd_hit_est_extra_args:
+
+# --- LucaProt RdRp probability prediction (step 4.2, Phylogenetic Identification Agent) ---
+lucaprot:
+  # Leave code_dir empty to auto-discover <repo>/scripts/LucaProt/src.
+  # Set it only when LucaProt lives somewhere else on this machine.
+  # Clone it with: git clone https://github.com/alibaba/LucaProt.git scripts/LucaProt
+  code_dir:
+  conda_env: lucaprot                    # conda environment holding the LucaProt dependencies
+  python:                                # empty = conda run -n <conda_env> python3
+  gpu_id: 2                              # GPU index; use 0 when only one device is visible
+  threshold: 0.5                         # RdRp probability threshold used for the binary call
+  truncation_seq_length: 4096            # maximum protein length fed to the model
+  dataset_name: rdrp_40_extend           # checkpoint dataset name
+  dataset_type: protein
+  task_type: binary_class
+  model_type: sefn
+  time_str: 20230201140320               # checkpoint timestamp
+  step: 100000                           # checkpoint global step
+  print_per_number: 10
+  emb_dir:                               # empty = <code_dir>/../emb
+  extra_args:                            # extra LucaProt arguments, passed through verbatim

@@ -7,23 +7,28 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from species_norm import normalize_species
 """
-脚本功能：
-- 扫描 <sample>.vmr_s.tsv / vmr_m.tsv / vmr_l.tsv
-- 每三个一组，按样本 ID 分组
-- 跳过 DIAMOND 注释行 #
-- 提取第一列 ID
-- 合并三表命中情况
-- 按 ID 去重
-- 输出：
-  - CRR1955286.vmr_merged.tsv
-  - CRR1955286.vmr_ids.txt
-  - dry-run 状态 JSON
-- 非 dry-run 时会继续执行：
-  - seqkit grep -f id.txt final.contigs.fa > hits.fa
-  - cd-hit-est ...
-  - 解析 .clstr
-  - 输出 CRR1955286.vmr_final.tsv
+Merge the three per-database DIAMOND hit tables into one record per contig.
+
+Steps
+-----
+1. Scan <sample>.vmr_s.tsv / vmr_m.tsv / vmr_l.tsv and group them by sample id.
+2. Skip DIAMOND comment lines starting with '#'.
+3. Take the identifier from the first column.
+4. Merge the hit status of the three tables.
+5. Deduplicate by identifier.
+6. Write:
+   - <sample>.vmr_merged.tsv
+   - <sample>.vmr_ids.txt
+   - the dry-run status JSON
+7. Outside dry-run mode, continue with:
+   - seqkit grep -f id.txt final.contigs.fa > hits.fa
+   - cd-hit-est ...
+   - parse the .clstr file
+   - write <sample>.vmr_final.tsv
 """
 DBS = ["s", "m", "l"]
 PICK_ORDER = ["l", "m", "s"]
@@ -228,8 +233,9 @@ def append_manifest(final_tsv, classified_tsv, manifest_csv):
         manifest_reader = csv.reader(src)
         manifest_header = next(manifest_reader)
         if len(manifest_header) < 2 or manifest_header[1] != "acc_base":
-            raise ValueError("manifest.csv 第二列必须是 acc_base")
+            raise ValueError("the second column of manifest.csv must be acc_base")
         extra_header = manifest_header[2:]
+        species_extra_i = manifest_header.index("species") - 2 if "species" in manifest_header else None
         manifest = {}
         for row in manifest_reader:
             if len(row) < 2:
@@ -247,7 +253,7 @@ def append_manifest(final_tsv, classified_tsv, manifest_csv):
         try:
             sseqid_index = header.index("sseqid")
         except ValueError as exc:
-            raise ValueError("vmr_final.tsv 缺少 sseqid 列") from exc
+            raise ValueError("vmr_final.tsv has no sseqid column") from exc
         writer.writerow(header + extra_header)
         for row in reader:
             total += 1
@@ -255,6 +261,9 @@ def append_manifest(final_tsv, classified_tsv, manifest_csv):
             extra = manifest.get(key)
             if extra is not None:
                 matched += 1
+                extra = list(extra)
+                if species_extra_i is not None and species_extra_i < len(extra):
+                    extra[species_extra_i] = normalize_species(extra[species_extra_i])
                 writer.writerow(row + extra)
             else:
                 writer.writerow(row)
@@ -269,8 +278,9 @@ def write_json(path, sample, status, message, outputs):
 
 def process_sample(sample, files, cfg, args):
     project_dir = Path(cfg["project_dir"])
+    conda_env = cfg.get("conda_env", "") or "lpy-hanta-v2"
     results_dir = cfg_path(cfg, project_dir, "results_dir", project_dir / "results")
-    vmr_dir = cfg_path(cfg, project_dir, "diamond_vmr_dir", results_dir / "06_diamond_vmr")
+    vmr_dir = results_dir / "06_diamond_vmr"
     log_dir = results_dir / "log" / sample
     threads = str(cfg.get("threads", "32") or "32")
     prefix = vmr_dir / sample
@@ -286,30 +296,30 @@ def process_sample(sample, files, cfg, args):
 
     missing = [d for d in DBS if d not in files]
     if missing:
-        write_json(result_json, sample, "failed", "缺少 VMR 表: " + ",".join(missing), outputs)
+        write_json(result_json, sample, "failed", "missing VMR tables: " + ",".join(missing), outputs)
         return 2
     contigs = find_contigs(results_dir, sample)
     if not contigs.is_file():
-        write_json(result_json, sample, "failed", "找不到 contigs: %s" % contigs, outputs)
+        write_json(result_json, sample, "failed", "contigs not found: %s" % contigs, outputs)
         return 2
 
     ids_list = merge_tables(files, merged, ids)
     if not ids_list:
-        write_json(result_json, sample, "success", "没有 VMR 命中 ID", outputs)
+        write_json(result_json, sample, "success", "no VMR hit identifiers", outputs)
         return 0
 
     vmr_cfg = cfg_section(cfg, "vmr_merge_cluster")
-    code = run_to_file(build_seqkit_cmd(vmr_cfg, ids, contigs), hit_fa, log_dir / "vmr_seqkit.log", args.dry_run)
+    code = run_to_file(["conda", "run", "-n", conda_env] + build_seqkit_cmd(vmr_cfg, ids, contigs), hit_fa, log_dir / "vmr_seqkit.log", args.dry_run)
     if code != 0:
-        write_json(result_json, sample, "failed", "seqkit 失败", outputs)
+        write_json(result_json, sample, "failed", "seqkit failed", outputs)
         return code
 
-    code = run(build_cdhit_cmd(vmr_cfg, hit_fa, clustered, threads), log_dir / "vmr_cdhit.log", args.dry_run)
+    code = run(["conda", "run", "-n", conda_env] + build_cdhit_cmd(vmr_cfg, hit_fa, clustered, threads), log_dir / "vmr_cdhit.log", args.dry_run)
     if code != 0:
-        write_json(result_json, sample, "failed", "cd-hit-est 失败", outputs)
+        write_json(result_json, sample, "failed", "cd-hit-est failed", outputs)
         return code
     if args.dry_run:
-        write_json(result_json, sample, "success", "dry-run 完成", outputs)
+        write_json(result_json, sample, "success", "dry-run complete", outputs)
         return 0
 
     reps = parse_cluster_reps(Path(str(clustered) + ".clstr"))
@@ -317,36 +327,59 @@ def process_sample(sample, files, cfg, args):
     try:
         total, matched = append_manifest(final, classified, manifest_csv)
     except (OSError, ValueError) as exc:
-        write_json(result_json, sample, "failed", "追加 manifest 失败: %s" % exc, outputs)
+        write_json(result_json, sample, "failed", "manifest append failed: %s" % exc, outputs)
         return 2
-    write_json(result_json, sample, "success", "完成，最终保留 %s 条，manifest 匹配 %s/%s 条" % (kept, matched, total), outputs)
+    write_json(result_json, sample, "success",
+               "done, %s representatives kept, manifest matched %s/%s"
+               % (kept, matched, total), outputs)
     return 0
+
+
+def find_default_config(script_dir):
+    """Locate the shared configuration by walking up from this script.
+
+    Handles both supported layouts:
+      * skill layout  <root>/<skill>/scripts/<script>.py  -> <root>/config.yaml
+      * flat layout   <root>/<script>.py                  -> <root>/config.yaml
+        (or a named project config in the same directory)
+
+    An explicit ``-c`` always wins.
+    """
+    for d in (script_dir, script_dir.parent,
+              script_dir.parent.parent, script_dir.parent.parent.parent):
+        for name in ("config.yaml", "config-cell-paper.yaml",
+                     "cell_submit-paper.yaml"):
+            cand = d / name
+            if cand.is_file():
+                return cand
+    return script_dir.parent.parent / "skills_V2" / "config.yaml"
 
 
 def main():
     script_dir = Path(__file__).resolve().parent
-    default_config = script_dir.parent.parent / "skills_V2" / "config.yaml"
+    default_config = find_default_config(script_dir)
     ap = argparse.ArgumentParser()
     ap.add_argument("-s", "--sample", default="")
     ap.add_argument("-c", "--config", default=str(default_config))
     ap.add_argument("--manifest", default=None,
-                    help="manifest.csv 路径；默认取 config 里 project_dir/DB/manifest.csv")
+                    help="path to manifest.csv; defaults to project_dir/DB/manifest.csv "
+                         "from the configuration")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     cfg = read_yaml(args.config)
     if not cfg.get("project_dir"):
-        print("config.yaml 缺少 project_dir", file=sys.stderr)
+        print("project_dir is missing from config.yaml", file=sys.stderr)
         return 2
     project_dir = Path(cfg["project_dir"])
     if not args.manifest:
         args.manifest = str(project_dir / "DB" / "manifest.csv")
     results_dir = cfg_path(cfg, project_dir, "results_dir", project_dir / "results")
-    vmr_dir = cfg_path(cfg, project_dir, "diamond_vmr_dir", results_dir / "06_diamond_vmr")
+    vmr_dir = results_dir / "06_diamond_vmr"
     groups = samples_from_dir(vmr_dir)
     if args.sample:
         groups = {args.sample: groups.get(args.sample, {})}
     if not groups:
-        print("没有找到 VMR TSV", file=sys.stderr)
+        print("no VMR TSV found", file=sys.stderr)
         return 2
     final_code = 0
     for sample, files in groups.items():
