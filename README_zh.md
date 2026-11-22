@@ -63,7 +63,7 @@ LucaProt 放在这个固定位置后，第 4 步无需任何路径配置。`scri
 ```
 Hanta-Agent/
 ├── skills/              六个 agent（各自含 SKILL.md + scripts/ + references/），
-│                        外加 config.example.yaml
+├── config.example.yaml  外加 config.example.yaml
 ├── scripts/LucaProt/    外部工具（clone 进来，不进 git）
 ├── env/                 两个 conda 环境定义
 ├── DB/                  参考数据库（25.7 MB 随仓库，1.2 GB rRNA 索引用 Release 下载）
