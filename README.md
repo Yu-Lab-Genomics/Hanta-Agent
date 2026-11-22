@@ -66,7 +66,7 @@ Placing LucaProt at that fixed location means step 4 needs no path configuration
 ```
 Hanta-Agent/
 ├── skills/              six agents (each with SKILL.md + scripts/ + references/),
-│                        plus config.example.yaml
+├── config.example.yaml                      plus config.example.yaml
 ├── scripts/LucaProt/    external tool (cloned, not tracked)
 ├── env/                 two conda environment definitions
 ├── DB/                  reference database: 25.7 MB shipped, 1.2 GB rRNA index from a release
