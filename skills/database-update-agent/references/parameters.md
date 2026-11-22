@@ -1,11 +1,11 @@
 # Parameters — Database Update Agent
 
-Four scripts. None of them reads a `config.yaml` section of its own; they only
+Five scripts. None of them reads a `config.yaml` section of its own; they only
 use `project_dir` to derive the database directory.
 
 ## Shared path resolution
 
-`build_clean_db.py`, `build_tree_ref.py`, `install_manifest.py` and
+`clean_db.py`, `build_clean_db.py`, `build_tree_ref.py`, `install_manifest.py` and
 `fetch_rrna_index.sh` all resolve the database directory the same three ways, in
 this priority order:
 
@@ -21,6 +21,98 @@ If none of these yields a directory, the script exits 2 and says so.
 |---|---|---|
 | `project_dir` | top level of `config.yaml` | The one key this agent reads. `<project_dir>/DB` becomes the database root |
 | `threads` | top level | **Not read here.** `build_tree_ref.py` uses `--threads` instead |
+
+## clean_db.py
+
+Applies the curation rules and writes the library the next two steps consume.
+
+| Flag | Type | Default | Purpose |
+|---|---|---|---|
+| `--db-dir` | path | *(resolved)* | Database root |
+| `--config` | path | *(discovered)* | Used only to derive `<project_dir>/DB` |
+| `--dry-run` | flag | off | Report the curation outcome and stop. Writes nothing |
+
+### Reads
+
+| Path | Content |
+|---|---|
+| `<db>/manifest.csv` | Full metadata table, 2,504 rows |
+| `<db>/diamond/vmr_L_99.fasta` | Dereplicated L-segment nucleotides |
+| `<db>/diamond/vmr_M_99.fasta` | Dereplicated M-segment nucleotides |
+| `<db>/diamond/vmr_S_99.fasta` | Dereplicated S-segment nucleotides |
+
+All four are required. A missing manifest exits 2 before any work starts. A
+missing nucleotide file is reported *after* the manifest has been read, so the
+`kept records` count still prints first — useful, because it tells you how much
+would survive regardless of which segment file is absent.
+
+### Writes
+
+| Path | Content |
+|---|---|
+| `<db>/clean/manifest_clean.csv` | Curated metadata, same columns as the input |
+| `<db>/clean/vmr_{L,M,S}_clean.fasta` | Only the records that survived curation |
+
+### Curation rules
+
+A record is dropped when any of these holds:
+
+| Rule | Reported as |
+|---|---|
+| Species name contains `sp.`, or is a bare genus name | `placeholder species` |
+| Species name is in the hand-maintained vague list | `vague name` |
+| Neither marked complete by NCBI nor above the segment length floor | `neither complete nor long enough` |
+
+The bare genus names are `Orthohantavirus`, `Mobatvirus`, `Thottimvirus`,
+`Loanvirus`, `Actinovirus`, `Percilovirus`, `Agnathovirus` and `Reptillovirus`.
+The vague list currently holds one entry, `Skink hantavirus`, which names no
+place and therefore cannot be tied to a location.
+
+"Marked complete" means the `description` or `title` column contains
+`complete genome`, `complete cds` or `complete sequence`, case-insensitively.
+
+| Segment | Length floor |
+|---|---|
+| L | 5,000 nt |
+| M | 3,000 nt |
+| S | 1,400 nt |
+
+A record that NCBI calls complete is kept regardless of length, so there is no
+absolute lower bound beyond the floor.
+
+### Expected output
+
+```
+input records : 2504
+kept records  : 2504
+species       : 113 (ICTV 57 + traditional 56)
+  vmr_L_clean.fasta: 570 sequences
+  vmr_M_clean.fasta: 694 sequences
+  vmr_S_clean.fasta: 1240 sequences
+```
+
+Two numbers deserve an explanation, because both look wrong at first glance.
+
+**`input records` equals `kept records`.** The shipped `manifest.csv` was already
+curated before release, so no rule fires and this step changes nothing. That is
+the expected result. The step still matters for two reasons: it regenerates
+`clean/` from scratch if those files are lost, and it is the place where a newly
+downloaded manifest would actually be filtered.
+
+**The sequence counts are far below the input file counts.** The nucleotide
+inputs hold more records than the manifest does:
+
+| Segment | Records in `vmr_<seg>_99.fasta` | Of those, present in `manifest.csv` | Written to `clean/` |
+|---|---|---|---|
+| L | 1,895 | 570 | 570 |
+| M | 1,682 | 694 | 694 |
+| S | 2,438 | 1,240 | 1,240 |
+
+The filter is by `acc_base`: a sequence is written only if its accession appears
+in the curated manifest. CD-HIT at 99% keeps every near-identical variant, while
+the manifest lists one entry per selected record, so most CD-HIT output never
+survives. This is by design — the manifest decides what the database contains,
+and `vmr_{L,M,S}_99.fasta` is just the pool it draws from.
 
 ## build_clean_db.py
 
@@ -156,18 +248,74 @@ Idempotent by design, so a setup script can call it unconditionally.
 
 ## fetch_rrna_index.sh
 
+Fetches the bowtie2 index. Two modes, chosen by the shape of the URL:
+
+| Mode | Trigger | Behaviour |
+|---|---|---|
+| archive | URL ends in `.tar.gz` or `.tgz` | One download, then the six `.bt2` files are extracted into `<db>/sortmerna/` |
+| files | any other URL | Six separate downloads against a base URL |
+
+Archive mode is the default and is what a fresh clone uses. Files mode is kept
+because it lets you replace one corrupt `.bt2` without pulling the whole 1.2 GB
+again.
+
 | Flag | Type | Default | Purpose |
 |---|---|---|---|
-| `--url` | string | *(none)* | Base URL of the release assets. Required unless `--check` or `--make-checksums` |
+| `--url` | string | the bundled release archive | Source to fetch. `.tar.gz` or `.tgz` selects archive mode, anything else files mode |
 | `--db-dir` | path | *(resolved)* | Database root; files land in `<db>/sortmerna/` |
 | `-c` / `--config` | path | *(discovered)* | Used to derive `<project_dir>/DB` |
+| `--sha256` | hex | *(empty)* | Expected SHA256 of the archive. Archive mode only; overrides the built-in value |
+| `--keep-archive` | flag | off | Keep the `.tar.gz` after extraction. Archive mode only |
 | `--check` | flag | off | Verify what is installed and exit. Writes nothing |
-| `--make-checksums` | flag | off | Write `SHA256SUMS` for the files present, then list what to upload |
-| `--with-fasta` | flag | off | Also fetch `rrna_merged.fasta` |
+| `--make-checksums` | flag | off | Write `SHA256SUMS` for the installed files and print the SHA256 of any archive present |
+| `--with-fasta` | flag | off | Files mode only: also fetch `rrna_merged.fasta` |
 | `--force` | flag | off | Re-download even when the index looks intact |
-| `--dry-run` | flag | off | Print the URLs that would be fetched |
+| `--dry-run` | flag | off | Print the plan and exit |
 
-### Files fetched
+### Archive mode, step by step
+
+1. If all six `.bt2` files are present and `--force` is absent, exit 0 without
+   touching the network.
+2. Download to `<db>/sortmerna/<name>.partial`, then rename. An archive already
+   on disk is reused unless `--force` is given.
+3. Verify the archive against `--sha256`, or against the value built into the
+   script. With neither set, the check is skipped and a warning is printed.
+4. Warn if free space under `<db>/sortmerna/` is below twice the archive size.
+5. Extract into `<db>/sortmerna/.extract-<random>/`.
+6. Locate each of the six files by name anywhere in the extracted tree, so an
+   archive that wraps everything in a directory works unchanged.
+7. Move the six files into `<db>/sortmerna/` and delete the scratch directory.
+8. Delete the archive unless `--keep-archive` was given.
+9. Run the same completeness check that `--check` performs.
+
+A failure at step 2 leaves `<name>.partial` behind; a failure at step 5 or 6
+leaves the `.extract-*` directory. Neither is cleaned up, so the cause can be
+inspected before retrying.
+
+### Where the URL and checksum come from
+
+Both values are resolved with the same precedence:
+
+```
+command line (--url / --sha256)  >  config.yaml  >  the constants in the script
+```
+
+The constants at the top of the script are:
+
+| Constant | Ships as |
+|---|---|
+| `DEFAULT_URL` | `.../releases/download/sortmerna-v1.0.0/rrna_index.tar.gz` |
+| `BUILTIN_ARCHIVE_SHA256` | empty, which means the download is not verified |
+
+`config.yaml` supplies them through `bowtie2.fetch_url` and
+`bowtie2.fetch_sha256`. `1-qc.sh` reads the same two keys, so one edit covers
+both the automatic preflight download and this script.
+
+After uploading a new archive, obtain the hash with `--make-checksums` and paste
+it into `config.yaml`, into `BUILTIN_ARCHIVE_SHA256`, or pass it per run with
+`--sha256`.
+
+### Files mode
 
 | File | Approximate size |
 |---|---|
@@ -188,23 +336,24 @@ it only if you plan to rebuild the index later.
 
 | Behaviour | Result |
 |---|---|
-| `SHA256SUMS` present | Every downloaded file is verified with `sha256sum -c --ignore-missing` |
-| `SHA256SUMS` absent | Installation proceeds and prints that integrity was not verified |
-| A checksum fails | Exit 1 with the failing file named |
-| A download fails | That file is counted, the rest continue, exit 1 at the end |
-
-Partially downloaded files are kept as `<name>.partial` rather than deleted, so a
-failure can be inspected or resumed.
+| `--sha256` or `ARCHIVE_SHA256` set, archive mode | The archive is hashed and compared; a mismatch exits 1 |
+| Neither set, archive mode | Installation proceeds and prints that integrity was not verified |
+| `SHA256SUMS` present, files mode | Every downloaded file is checked with `sha256sum -c --ignore-missing` |
+| `SHA256SUMS` absent, files mode | Installation proceeds and prints that integrity was not verified |
+| A checksum fails | Exit 1 with the failing file or archive named |
+| A download fails, files mode | That file is counted, the rest continue, exit 1 at the end |
 
 ### Uploading the assets
 
+For the archive layout a single file is enough:
+
 ```bash
-bash fetch_rrna_index.sh --db-dir <path> --make-checksums
+bash fetch_rrna_index.sh --db-dir <path> --make-checksums   # prints the archive SHA256
 ```
 
-This writes `<db>/sortmerna/SHA256SUMS` and prints the exact file list to upload.
-Attach those seven files to the release, then pass the release's download base URL
-to `--url`.
+Upload `rrna_index.tar.gz`, then paste the printed hash into `ARCHIVE_SHA256`.
+For the per-file layout, `--make-checksums` writes `<db>/sortmerna/SHA256SUMS`
+and prints the file list to upload alongside it.
 
 ## GitHub release size limits
 

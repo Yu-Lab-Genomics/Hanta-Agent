@@ -84,6 +84,24 @@ are permissive; a library that loses everything here is usually mis-specified
 Both are treated as fatal on purpose: an empty depleted library cannot produce a
 meaningful assembly.
 
+### 4.3.1 rRNA index download (preflight)
+
+Preflight fetches the six bowtie2 files when they are missing, so this section
+covers the download itself rather than bowtie2.
+
+| Message | Cause | Fix |
+|---|---|---|
+| `rRNA index incomplete and bowtie2.auto_fetch is not true` | The index is missing and automatic download is disabled | Set `bowtie2.auto_fetch: true`, or run `bash skills/database-update-agent/scripts/fetch_rrna_index.sh --db-dir <project_dir>/DB` |
+| `rRNA index download failed: <url>` | No network, a wrong URL, or the release asset is gone | Check `bowtie2.fetch_url`. The exact manual command is printed just above the error |
+| `rRNA index checksum mismatch: expected <a>, got <b>` | The archive is truncated, or `fetch_sha256` is stale | Delete `<ref_dir>/rrna_index.tar.gz` and rerun. If it repeats after a re-download, clear or refresh `fetch_sha256` |
+| `rRNA index archive does not contain <file>` | The tarball is missing one of the six `.bt2` files | Repack the archive. The extracted tree is kept under `.extract-*` so you can see what was inside |
+| `rRNA index extraction failed` | Corrupt gzip stream, or a full disk | Free space in `<ref_dir>`; the archive is kept so it can be retested |
+| `neither curl nor wget is available` | Neither downloader is on `PATH` | Install one, or fetch the index by hand before running this agent |
+
+A missing index is fatal at preflight, before any sample is touched. That is
+intentional: failing on the first sample after ten minutes of preprocessing is
+worse than failing in the first second.
+
 ### 4.4 MEGAHIT
 
 | Message | Cause | Fix |

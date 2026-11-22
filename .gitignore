@@ -1,0 +1,67 @@
+# =============================================================================
+# Hanta-Agent .gitignore
+#
+# The rule that matters most is near the top: LucaProt is cloned separately and
+# weighs about 870 MB. Without that entry a single `git add .` would try to
+# commit it, and GitHub rejects any file above 100 MB anyway.
+# =============================================================================
+
+# --- Local configuration -----------------------------------------------------
+# config.yaml holds absolute paths for the machine it runs on. The template that
+# ships with the repository is config.example.yaml.
+skills/config.yaml
+
+# --- External tool source, cloned on demand ----------------------------------
+# git clone https://github.com/alibaba/LucaProt.git scripts/LucaProt
+# ~870 MB, 1048 files. Never belongs in this repository.
+scripts/LucaProt/
+
+# --- Analysis output ---------------------------------------------------------
+# Result directories are per-run and can reach tens of gigabytes.
+results/
+results_*/
+*.log
+
+# --- Reference database: large files shipped as release assets ---------------
+# 1.2 GB total. Fetch with skills/database-update-agent/scripts/fetch_rrna_index.sh
+DB/sortmerna/*.bt2
+DB/sortmerna/rrna_merged.fasta
+DB/sortmerna/*.partial
+# The release archive itself, and the scratch directory used while extracting it.
+DB/sortmerna/*.tar.gz
+DB/sortmerna/*.tgz
+DB/sortmerna/.extract-*
+
+# --- Regenerable build intermediates -----------------------------------------
+# Prodigal output and the DIAMOND artefacts left over in clean/. Both are
+# recreated by build_clean_db.py, so they do not need to be tracked.
+DB/clean/*_clean_proteins.faa
+DB/clean/*_clean_genes.ffn
+DB/clean/vmr_l.fa
+DB/clean/vmr_m.fa
+DB/clean/vmr_s.fa
+DB/clean/vmr_l.dmnd
+DB/clean/vmr_m.dmnd
+DB/clean/vmr_s.dmnd
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- Editor and OS -----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local backups and partial downloads -------------------------------------
+*.bak
+*.bak_*
+*.partial
+*.tmp

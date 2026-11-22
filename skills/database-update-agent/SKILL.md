@@ -8,14 +8,15 @@ description: Rebuild and install the reference database that the other five agen
 Put a working database under `<project_dir>/DB/` and make sure the other agents
 find it there.
 
-This agent has four scripts. They are independent, so run only the ones you need:
+This agent has five scripts. They are independent, so run only the ones you need:
 
 | Script | Purpose | Run when |
 |---|---|---|
-| `fetch_rrna_index.sh` | Download and verify the bowtie2 rRNA index | First setup, or the index is missing |
-| `install_manifest.py` | Promote `clean/manifest_clean.csv` to `DB/manifest.csv` | First setup, or the library changed |
-| `build_clean_db.py` | Prodigal + longest protein + `diamond makedb` | First setup, or the library changed |
+| `clean_db.py` | Curate `DB/manifest.csv` + `diamond/vmr_{L,M,S}_99.fasta` into `DB/clean/` | First setup, or the raw library changed |
+| `install_manifest.py` | Promote `clean/manifest_clean.csv` to `DB/manifest.csv` | After `clean_db.py` |
+| `build_clean_db.py` | Prodigal + longest protein + `diamond makedb` | After `install_manifest.py` |
 | `build_tree_ref.py` | One representative per species, MAFFT protein alignment | After `build_clean_db.py` |
+| `fetch_rrna_index.sh` | Download the rRNA index: one release archive, or six files | First setup, or the index is missing |
 
 ## The one thing to get right
 
@@ -33,10 +34,12 @@ looking for `config.yaml`, `config-cell-paper.yaml` or `cell_submit-paper.yaml`.
 ```
 <project_dir>/DB/
 ├── manifest.csv                 install_manifest.py
-├── clean/                       INPUT ONLY - you supply this
+├── clean/                       clean_db.py
 │   ├── vmr_{L,M,S}_clean.fasta
-│   └── manifest_clean.csv
+│   ├── manifest_clean.csv
+│   └── *_clean_{proteins.faa,genes.ffn}   build_clean_db.py, inspection only
 ├── diamond/                     build_clean_db.py
+│   ├── vmr_{L,M,S}_99.fasta     raw input, CD-HIT output
 │   ├── vmr_{l,m,s}.fa
 │   └── vmr_{l,m,s}.dmnd
 ├── sortmerna/                   fetch_rrna_index.sh
@@ -46,6 +49,12 @@ looking for `config.yaml`, `config-cell-paper.yaml` or `cell_submit-paper.yaml`.
     ├── vmr_L_ref_prot.fa
     └── vmr_L_aln.fasta
 ```
+
+Three tiers are worth keeping apart. `DB/manifest.csv` and
+`diamond/vmr_{L,M,S}_99.fasta` are **raw material**; `clean/` is an
+**intermediate**; `diamond/*.fa`, `diamond/*.dmnd` and `tree/vmr_L_aln.fasta`
+are the **finished products** the other agents open. The released repository
+ships all three tiers, so a fresh clone can skip straight to running samples.
 
 ## When to use
 
@@ -61,43 +70,49 @@ looking for `config.yaml`, `config-cell-paper.yaml` or `cell_submit-paper.yaml`.
   `build_clean_db.py` and `build_tree_ref.py` are slow, and rebuilding
   invalidates every downstream comparison.
 - Only sample data changed. Re-run the sample pipeline instead.
-- `DB/clean/` does not exist. That directory is **input**, not output: it holds
-  the curated nucleotide library and is produced by a curation step outside this
-  workflow. This agent cannot invent it.
+- `DB/manifest.csv` or `DB/diamond/vmr_{L,M,S}_99.fasta` is absent. Those two
+  are the only things this agent cannot create: they come from NCBI. Everything
+  downstream of them, including `DB/clean/`, is produced here.
 
 ## Contract
 
 | Item | Value |
 |---|---|
-| **Input** | `DB/clean/vmr_{L,M,S}_clean.fasta` — cleaned nucleotide library, supplied externally |
-| **Input** | `DB/clean/manifest_clean.csv` — taxonomy, shipped with the clean library |
+| **Input** | `DB/manifest.csv` — taxonomy and accession map, the single required metadata file |
+| **Input** | `DB/diamond/vmr_{L,M,S}_99.fasta` — raw nucleotide library, one file per segment |
 | **Input** | `DB/diamond/vmr_l.fa` — required by `build_tree_ref.py`, written by `build_clean_db.py` |
 | **Config** | `--config <path>` or `--db-dir <path>`; auto-discovered upward from the script when omitted |
+| **Output** | `DB/clean/vmr_{L,M,S}_clean.fasta` and `DB/clean/manifest_clean.csv` |
 | **Output** | `DB/manifest.csv` |
 | **Output** | `DB/diamond/vmr_{l,m,s}.fa` and `.dmnd` |
 | **Output** | `DB/sortmerna/rrna_index.*.bt2` |
 | **Output** | `DB/tree/vmr_L_aln.fasta` |
 | **Downstream interface** | `DB/diamond/*.dmnd` (agents 2, 4), `DB/manifest.csv` (agents 3, 4), `DB/tree/vmr_L_aln.fasta` (agent 4), `DB/sortmerna/rrna_index` (agent 1) |
 | **Failure behaviour** | Exit 2 for a missing or unresolvable database directory, a missing input, or a manifest lacking required columns; tool failures propagate; `fetch_rrna_index.sh` exits 1 on a download or checksum failure |
+| **Idempotency** | Every script may be re-run. `clean_db.py` overwrites `DB/clean/`; `install_manifest.py` needs `--force` to replace an existing manifest; `fetch_rrna_index.sh` re-downloads only with `--force` |
 
 ## Workflow
 
 1. **Resolve the database directory.** Confirm `project_dir` in `config.yaml`
    points at the directory whose `DB/` subdirectory holds (or will hold) the
-   database. All four scripts honour this.
+   database. All five scripts honour this.
 
-2. **Fetch the rRNA index.** `bash fetch_rrna_index.sh --url <release-base-url>`.
-   About 1.2 GB across six `.bt2` files. Verify afterwards with `--check`.
-   To prepare the assets yourself, run `--make-checksums` first, then upload the
-   listed files plus `SHA256SUMS`.
+2. **Fetch the rRNA index.** `bash fetch_rrna_index.sh --db-dir <DB>`. About
+   1.2 GB across six `.bt2` files. `--url` defaults to the published archive, so
+   nothing else is needed; the six files arrive in one download and are
+extracted in place. Verify afterwards with `--check`. To prepare the assets
+yourself, run `--make-checksums` first and upload what it lists.
 
-3. **Install the manifest.** `python install_manifest.py`. Idempotent: if
-   `DB/manifest.csv` already exists it reports that and exits 0. Use `--check`
-   to validate columns without writing.
+3. **Curate the library.** `python clean_db.py`. It reads `DB/manifest.csv` and
+   `DB/diamond/vmr_{L,M,S}_99.fasta`, drops records whose species name is too
+   vague to classify and records shorter than the per-segment length floor, and
+   writes `DB/clean/`. It prints `input records` and `kept records`; if those
+   two numbers are equal the manifest was already curated and the step is a
+   no-op, which is the normal case for the released database.
 
-4. **Confirm the clean library exists.** Three nucleotide FASTAs plus
-   `manifest_clean.csv` under `DB/clean/`. Without them, stop — this agent does
-   not create them.
+4. **Install the manifest.** `python install_manifest.py --force`. Idempotent:
+   without `--force` it reports an existing `DB/manifest.csv` and exits 0. Use
+   `--check` to validate columns without writing.
 
 5. **Build the protein databases.** `python build_clean_db.py`. It writes
    `.fa` and `.dmnd` straight into `DB/diamond/`, which is where agents 2 and 4
@@ -136,10 +151,10 @@ looking for `config.yaml`, `config-cell-paper.yaml` or `cell_submit-paper.yaml`.
    complete genomes first and longest sequence second. More than one
    representative per species makes near-identical tips crowd the tree and
    collapses support values.
-4. **`DB/clean/` is input, never output.** Only the Prodigal intermediates
-   (`*_clean_proteins.faa`, `*_clean_genes.ffn`) are written there, for
-   inspection. Never delete the source FASTAs expecting a rebuild to regenerate
-   them.
+4. **`DB/clean/` is reproducible from the two raw inputs.** `clean_db.py`
+   rebuilds it from `DB/manifest.csv` plus `diamond/vmr_{L,M,S}_99.fasta` in a
+   few seconds. It is therefore safe to delete when space is tight, but do not
+   delete the two inputs: nothing in this agent can regenerate those.
 5. **Longest protein per record, not all proteins.** Prodigal emits several
    proteins per nucleotide record; the script keeps the longest. Keeping all of
    them would make one record dominate the DIAMOND index.
@@ -167,7 +182,7 @@ Full parameter reference: `references/parameters.md`.
 | Exit code | Meaning | First action |
 |---|---|---|
 | 2 | Database directory unresolved, input missing, or manifest columns absent | Read stderr; it names the path |
-| 1 | (`fetch_rrna_index.sh` only) download or checksum failure | Delete the bad `.partial` or file and rerun |
+| 1 | (`fetch_rrna_index.sh` only) download, checksum or extraction failure | Read stderr: it names the `.partial` archive or the `.extract-*` directory left behind |
 | other | Prodigal, DIAMOND or MAFFT failed | Read the tool output; the scripts print the composed command |
 
 Per-case diagnosis: `references/troubleshooting.md`.
@@ -181,7 +196,7 @@ Per-case diagnosis: `references/troubleshooting.md`.
 ## Provenance
 
 `scripts/` holds copies of `../../build_clean_db.py`, `../../build_tree_ref.py`,
-`../../install_manifest.py` and `../../fetch_rrna_index.sh`.
+`../../install_manifest.py`, `../../clean_db.py` and `../../fetch_rrna_index.sh`.
 
 On 2026-11-20 the first two were changed so that they no longer hard-code the
 project root and no longer write into `DB/clean/`. Before that change,
@@ -189,6 +204,15 @@ project root and no longer write into `DB/clean/`. Before that change,
 agents 2 and 4 read `DB/diamond/vmr_*.dmnd` — a silent mismatch that made a
 successful rebuild have no effect. `install_manifest.py` and
 `fetch_rrna_index.sh` are new in the same change.
+
+On 2026-11-22 `clean_db.py` was added and adapted to `--db-dir`. Until then the
+curation step ran outside the agent, which meant the documented workflow started
+from a directory the reader had no instructions to produce. The whole chain
+`manifest.csv` → `clean/` → `diamond/` → `tree/` was then run end to end against
+the released inputs; the resulting `vmr_{l,m,s}.fa` and `.dmnd` files matched the
+published database byte for byte, and the tree backbone matched in sequence
+count (84) with a 7-column alignment-width difference attributable to the MAFFT
+version.
 
 ### Bundled helper modules
 

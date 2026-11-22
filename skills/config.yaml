@@ -66,6 +66,12 @@ bowtie2:
   index_prefix: rrna_index
   # 比对灵敏度预设：very-fast, fast, sensitive, very-sensitive
   preset: very-sensitive
+  # 索引缺失时是否自动下载（Release 资产，约 1.2 GB，只需下载一次）
+  auto_fetch: true
+  # 索引压缩包地址；留空则用脚本内置的默认 Release 地址
+  fetch_url: https://github.com/Yu-Lab-Genomics/Hanta-Agent/releases/download/sortmerna-v1.0.0/rrna_index.tar.gz
+  # 压缩包 SHA256；留空则不校验
+  fetch_sha256:
   extra_args:
 
 # --- MEGAHIT 组装参数；PDF p23-p24 描述为 default parameters ---

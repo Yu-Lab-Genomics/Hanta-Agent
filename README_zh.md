@@ -6,6 +6,27 @@
 
 ![Hanta-Agent workflow](figure/figure1_ture.png)
 
+## 快速开始
+
+```bash
+git clone https://github.com/Yu-Lab-Genomics/Hanta-Agent.git && cd Hanta-Agent
+git clone https://github.com/alibaba/LucaProt.git scripts/LucaProt   # 870 MB，第 4 步要用
+
+conda env create -f env/lpy-hanta-v2.yml    # 主流程
+conda env create -f env/lucaprot.yml        # 只有可选的 LucaProt 步骤才需要
+cp skills/config.example.yaml skills/config.yaml   # 然后改 project_dir、data_dir、results_dir
+```
+
+装完就完事了。然后在装了 AI 助手的编辑器里打开这个仓库，说一句：
+
+> 用 hanta-agent 分析 `data/` 下的双端样本 SRR24112974。每一步先 --dry-run 把命令给我看，我确认后再真跑。哪一步失败就停下来问我。
+
+它会自己读每个阶段的 `skills/<agent>/SKILL.md`，按顺序跑完。
+
+**没有下载数据库这一步。** `DB/` 随仓库一起下发，唯一的大件——1.2 GB 的 rRNA 索引——会在第 1 步第一次运行时自动下载好。
+
+每一步的细节见下面各节。
+
 ## 1. 这是什么
 
 图中五个 agent 依次执行，每一步都复核上一步产物是否可信；`Database Update Agent` 在旁提供参考数据库。
@@ -23,7 +44,7 @@
 | 3 | Sequence Identification | 合并三库命中、去冗余、挂参考元数据 | 命中表 → 分类表 |
 | 4 | Phylogenetic Identification | 建共享树、定种、LucaProt 概率 | 分类表 → 带树列的分类表 + L 蛋白 |
 | 5 | Risk Scoring Reporting | 打分、分级、生成报告 | 上述产物 → 分数 + HTML 报告 |
-| 6 | Database Update | 构建 / 更新参考数据库 | 清洗后核酸库 → DIAMOND 库 + 树骨架 |
+| 6 | Database Update | 构建 / 更新参考数据库 | 元数据表 + 去冗余核酸库 → DIAMOND 库 + 树骨架 |
 
 参数、输出格式、排错手册见各 agent 的 `SKILL.md` 与 `references/`。
 
@@ -41,12 +62,15 @@ LucaProt 放在这个固定位置后，第 4 步无需任何路径配置。`scri
 
 ```
 Hanta-Agent/
-├── skills/              六个 agent（各自含 SKILL.md + scripts/ + references/）+ config.yaml
+├── skills/              六个 agent（各自含 SKILL.md + scripts/ + references/），
+│                        外加 config.example.yaml
 ├── scripts/LucaProt/    外部工具（clone 进来，不进 git）
 ├── env/                 两个 conda 环境定义
-├── DB/                  参考数据库
+├── DB/                  参考数据库（25.7 MB 随仓库，1.2 GB rRNA 索引用 Release 下载）
 └── figure/              README 用图
 ```
+
+`config.yaml` 不在上面，因为它不进 git；按 3.2 节从模板复制。
 
 根目录 `scripts/` 只放外部工具代码，流程脚本在 `skills/<agent>/scripts/`。
 
@@ -61,7 +85,13 @@ conda env create -f env/lucaprot.yml        # LucaProt 推理（PyTorch 版本�
 
 ### 3.2 配置文件
 
-编辑 `skills/config.yaml`，改三处：
+`config.yaml` 存的是本机绝对路径，所以不进 git。先从模板复制：
+
+```bash
+cp skills/config.example.yaml skills/config.yaml
+```
+
+然后编辑 `skills/config.yaml`，改三处：
 
 ```yaml
 project_dir: /path/to/Hanta-Agent        # 数据库在这个目录下的 DB/
@@ -72,6 +102,16 @@ paths:
 ```
 
 `project_dir` 只用于定位 `<project_dir>/DB`，填错则六个 agent 都读不到库。
+
+### 3.3 参考数据库
+
+`DB/` 随仓库一起 clone 下来，除了 rRNA 索引之外什么都有：元数据表、DIAMOND 索引、清洗后核酸库、建树骨架，共 25.7 MB。这部分不用管。
+
+rRNA 索引是 6 个 bowtie2 文件，共约 1.2 GB，放在 Release 上。**你不用自己去下。** 第 1 个 agent 在跑任何样本之前会检查索引，缺了就自动下载好，所以 clone 完直接跳到下面第 4 步即可。
+
+计算节点不能上网的话，先在一台能上网的机器上下好——命令见 [`DB/README.md`](DB/README.md) 第 3 节。两种方式都是压缩包下载、解压到 `DB/sortmerna/`、再删掉压缩包。把配置里的 `bowtie2.auto_fetch` 改成 `false` 就能关掉自动下载。
+
+完整的目录结构、每个文件谁在用、以及重建方法：见 [`DB/README.md`](DB/README.md)。
 
 ## 4. prompt 怎么写
 
@@ -131,47 +171,22 @@ paths:
 
 ## 6. 最小可跑示例
 
-先用一个样本走通，再上全量。
+先用一个样本走通，再上全量。下面每一步都是你对 AI 说的一句话，它自己读对应的 `SKILL.md` 决定跑什么。
 
-```bash
-# 0) 前提：data/ 下有一个样本的双端文件，如 SRR24112974_R1.fq.gz / _R2.fq.gz
+**前提**：`data/` 下有一个样本的双端文件，例如 `SRR24112974_R1.fq.gz` 和 `SRR24112974_R2.fq.gz`。数据库不用准备——`DB/` 随仓库下发，1.2 GB 的 rRNA 索引由第 1 步首次运行时自动下载。
 
-# 1) 质控（几分钟）
-bash skills/quality-control-agent/scripts/1-qc.sh \
-     -c skills/config.yaml -s SRR24112974 --dry-run     # 先看命令
-bash skills/quality-control-agent/scripts/1-qc.sh \
-     -c skills/config.yaml -s SRR24112974
-#    → results/04_megahit/SRR24112974/final.contigs.fa、results/json/*.qc.json
+| 步 | 这么说 | 得到什么 |
+|---|---|---|
+| 1 | 「对 SRR24112974 做质控，先 dry-run 给我看」 | `results/04_megahit/SRR24112974/final.contigs.fa`、`results/json/SRR24112974.qc.json` |
+| 2 | 「质控没问题，继续做组装和比对」 | `results/06_diamond_vmr/SRR24112974.vmr_{l,m,s}.tsv` |
+| 3 | 「合并去冗余」 | `results/06_diamond_vmr/SRR24112974.vmr_final_classified.tsv` |
+| 4 | 「建树并定种」 | `results/07_tree/_all/`、`results/00_results/all_vmr_final_classified.tsv` |
+| 4b | 「对 L 蛋白跑 LucaProt」——可选，需要 GPU 环境 | `results/00_results/l.fasta.csv` |
+| 5 | 「打分并出报告」 | `results/00_results/{results.tsv, species_risk.tsv, report.html}` |
 
-# 2) 组装 + 比对（组装耗时最长）
-python skills/sequence-handle-agent/scripts/2-species_class.py \
-       -c skills/config.yaml -s SRR24112974
-#    → results/06_diamond_vmr/SRR24112974.vmr_{l,m,s}.tsv
+每一步确认产物没问题再往下走。某一步失败，它应该去读 `results/json/<样本>.*.json`，报出 `failed_step` 和 `message`，而不是猜。
 
-# 3) 合并去冗余（快）
-python skills/sequence-identification-agent/scripts/3-vmr-merge-cluster.py \
-       -c skills/config.yaml -s SRR24112974
-#    → results/06_diamond_vmr/SRR24112974.vmr_final_classified.tsv
-
-# 4) 建树定种（IQ-TREE 最慢，几十分钟量级）
-python skills/phylogenetic-identification-agent/scripts/4-vmr-tree.py \
-       -c skills/config.yaml -s SRR24112974
-#    → results/07_tree/_all/、results/00_results/all_vmr_final_classified.tsv
-
-# 4b) LucaProt 概率（可选，需 GPU 环境）
-bash skills/phylogenetic-identification-agent/scripts/4.2-lucaprot.sh \
-     -c skills/config.yaml
-#    → results/00_results/l.fasta.csv
-
-# 5) 打分 + 报告
-python skills/risk-scoring-reporting-agent/scripts/5.3-risk_score.py \
-       --config skills/config.yaml
-python skills/risk-scoring-reporting-agent/scripts/5.4-report.py \
-       --config skills/config.yaml
-#    → results/00_results/{results.tsv, species_risk.tsv, report.html}
-```
-
-`report.html` 正常、数字对得上，再按同样顺序跑全部样本（去掉 `-s`）。
+`report.html` 正常、数字对得上，再按同样方式跑全部样本——说「把 `data/` 下的样本全跑一遍」而不是点名一个。
 
 **第 4 步是所有样本共用一棵树**：批量跑时先做完所有样本的第 1–3 步，再统一跑第 4 步。每样本各建一棵树会导致分支长度不可比。
 

@@ -1,0 +1,165 @@
+# =============================================================================
+# Hanta-Agent configuration template
+#
+# Copy this file to config.yaml and edit the four values marked CHANGE ME:
+#
+#     cp skills/config.example.yaml skills/config.yaml
+#
+# config.yaml is gitignored because it holds absolute paths for one machine.
+# Every script finds it by walking up from its own directory, so it must stay at
+# skills/config.yaml.
+# =============================================================================
+
+# --- Project root -------------------------------------------------------------
+# Everything is located relative to this: the pipeline reads <project_dir>/DB and
+# writes into the results_dir below. Getting this wrong is the single most common
+# setup mistake, because no script fails loudly: they simply find no database.
+project_dir: /path/to/Hanta-Agent                             # CHANGE ME
+
+# --- conda environment --------------------------------------------------------
+conda_env: lpy-hanta-v2
+
+# --- Threads; "auto" detects nproc, getconf or sysctl -------------------------
+threads: 8
+
+# --- External executables; absolute path or a name on PATH --------------------
+software:
+  seqkit: seqkit
+  diamond: diamond
+  mafft: mafft
+  trimal: trimal
+  iqtree3: iqtree3
+
+# --- Input and output directories ---------------------------------------------
+# Downstream scripts prefer results_dir from here over any default.
+paths:
+  data_dir: /path/to/your/fastq                                # CHANGE ME
+  results_dir: /path/to/your/results                           # CHANGE ME
+
+# --- Paired-end suffix patterns used to discover samples in data_dir ----------
+input:
+  r1_suffixes: "_r1.fq.gz,_R1.fq.gz,.r1.fq.gz,.R1.fq.gz,_1.fq.gz,_1.fastq.gz,_R1.fastq.gz,_r1.fastq.gz"
+  r2_suffixes: "_r2.fq.gz,_R2.fq.gz,.r2.fq.gz,.R2.fq.gz,_2.fq.gz,_2.fastq.gz,_R2.fastq.gz,_r2.fastq.gz"
+
+# --- fastp: quality control and adapter trimming ------------------------------
+# Replaces the fastp + SOAPnuke pair from the original workflow.
+fastp:
+  disable_adapter_trimming: false
+  detect_adapter_for_pe: true
+  cut_front: true
+  cut_tail: true
+  cut_right: true
+  cut_front_window_size: 5
+  cut_tail_window_size: 5
+  cut_right_window_size: 5
+  cut_front_mean_quality: 20
+  cut_tail_mean_quality: 20
+  cut_right_mean_quality: 20
+  qualified_quality_phred: 20
+  unqualified_percent_limit: 20
+  n_base_limit: 0
+  length_required: 50
+  extra_args:
+
+# --- PRINSEQ++: low-complexity filtering --------------------------------------
+prinseq:
+  lc_entropy: 0.5
+  lc_dust: 0.5
+  extra_args:
+
+# --- bowtie2: rRNA depletion --------------------------------------------------
+# Replaces SortMeRNA. The directory name below is historical: the index was built
+# from the SILVA-derived rRNA FASTA that SortMeRNA used, and bowtie2 reads the
+# same .bt2 files.
+bowtie2:
+  # Leave empty to use <project_dir>/DB/sortmerna
+  ref_dir:
+  # bowtie2 index prefix inside ref_dir
+  index_prefix: rrna_index
+  # very-fast, fast, sensitive, very-sensitive
+  preset: very-sensitive
+  # Download the index automatically when it is missing. One-off, about 1.2 GB.
+  auto_fetch: true
+  # Release asset holding the six .bt2 files as one archive.
+  fetch_url: https://github.com/Yu-Lab-Genomics/Hanta-Agent/releases/download/sortmerna-v1.0.0/rrna_index.tar.gz
+  # Expected SHA256 of that archive. Leave empty to skip the check.
+  fetch_sha256:
+  extra_args:
+
+# --- MEGAHIT assembly ---------------------------------------------------------
+megahit:
+  min_contig_len: 500
+  overwrite: true
+  extra_args:
+
+cleanup:
+  intermediates: true
+
+# --- Prodigal ORF prediction --------------------------------------------------
+# Also emits proteins above min_protein_aa for the tree step.
+prodigal:
+  mode: meta
+  min_protein_aa: 200
+  extra_args:
+
+# --- DIAMOND search -----------------------------------------------------------
+diamond:
+  evalue: 0.00001
+  max_target_seqs: 1
+
+# --- MAFFT alignment ----------------------------------------------------------
+mafft:
+  preset: auto
+
+# --- trimAl trimming ----------------------------------------------------------
+trimal:
+  method: automated1
+  out_format: fasta
+
+# --- IQ-TREE3 ---------------------------------------------------------------
+iqtree3:
+  model: MFP
+  bootstrap: 1000
+  alrt: 1000
+
+# --- Phylogenetic analysis ----------------------------------------------------
+phylogeny:
+  sh_alrt_min: 80
+  mafft_preset: auto
+  iqtree_bootstrap: 1000
+  iqtree_alrt: 1000
+
+# --- Post-merge extraction and clustering -------------------------------------
+vmr_merge_cluster:
+  seqkit_grep_extra_args:
+  cd_hit_est_c: 0.99
+  cd_hit_est_aS: 0.8
+  cd_hit_est_n: 10
+  cd_hit_est_g: 1
+  cd_hit_est_G: 0
+  cd_hit_est_d: 0
+  cd_hit_est_p: 1
+  cd_hit_est_M: 0
+  cd_hit_est_T:
+  cd_hit_est_extra_args:
+
+# --- LucaProt RdRp probability prediction (step 4.2) --------------------------
+lucaprot:
+  # Leave code_dir empty to auto-discover <repo>/scripts/LucaProt/src.
+  # Set it only when LucaProt lives somewhere else on this machine.
+  # Clone it with: git clone https://github.com/alibaba/LucaProt.git scripts/LucaProt
+  code_dir:
+  conda_env: lucaprot                    # conda environment holding the LucaProt dependencies
+  python:                                # empty = conda run -n <conda_env> python3
+  gpu_id: 0                              # GPU index; 0 for a single visible device
+  threshold: 0.5                         # RdRp probability threshold for the binary call
+  truncation_seq_length: 4096            # maximum protein length fed to the model
+  dataset_name: rdrp_40_extend           # checkpoint dataset name
+  dataset_type: protein
+  task_type: binary_class
+  model_type: sefn
+  time_str: 20230201140320               # checkpoint timestamp
+  step: 100000                           # checkpoint global step
+  print_per_number: 10
+  emb_dir:                               # empty = <code_dir>/../emb
+  extra_args:                            # extra LucaProt arguments, passed through verbatim

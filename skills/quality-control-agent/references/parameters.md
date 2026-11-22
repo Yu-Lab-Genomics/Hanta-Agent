@@ -139,12 +139,34 @@ survived) and `_bad_out`; the agent resolves and uses the paired output.
 | `index_prefix` | `rrna_index` | Index basename inside `<project_dir>/DB/sortmerna` |
 | `preset` | `very-sensitive` | One of `very-fast`, `fast`, `sensitive`, `very-sensitive` |
 | `ref_dir` | `<project_dir>/DB/sortmerna` | Directory holding the index |
+| `auto_fetch` | `true` | Download the index during preflight when any of the six files is missing |
+| `fetch_url` | the release archive | Archive to download; `.tar.gz` or `.tgz` |
+| `fetch_sha256` | empty | Expected SHA256 of the archive; empty skips verification |
 | `extra_args` | empty | Appended verbatim to the bowtie2 command line |
+
+Leaving `ref_dir` empty also resolves to `<project_dir>/DB/sortmerna`. An empty
+value falls back to the default instead of emitting an empty path, which would
+make bowtie2 search the current directory.
 
 The command uses `--un-conc-gz`, so **unmapped** reads — the ones that are not
 rRNA — are written to disk; aligned reads go to `/dev/null` via `--no-unal` and
 `-S /dev/null`. If the index has the wrong prefix, bowtie2 fails immediately with
 a missing-index error rather than producing empty output.
+
+### Automatic index download
+
+Preflight runs before the first sample and checks all six `.bt2` files:
+
+| Situation | Behaviour |
+|---|---|
+| All six present | Nothing happens, no network access |
+| Some missing, `auto_fetch: true` | Downloads to `<ref_dir>/<name>.partial`, renames, verifies `fetch_sha256` when set, extracts into `<ref_dir>/.extract-*`, moves the six files into place, deletes the archive |
+| Some missing, `auto_fetch: false` | Prints the missing count and the manual command, then exits 1 with `failed_step: preflight` |
+| `--dry-run` | Prints what is missing and what would be downloaded, writes nothing |
+| Download, checksum or extraction fails | Exits 1 with the reason on stderr. A failed download removes its `.partial`; a failed extraction keeps `.extract-*` for inspection |
+
+Extraction locates each file by name anywhere in the archive, so a tarball that
+wraps everything in a directory behaves the same as one that does not.
 
 ---
 

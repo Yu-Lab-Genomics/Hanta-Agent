@@ -129,7 +129,13 @@ def read_simple_yaml(path):
 
 def get(section, key, default=""):
     data = cfg.get(section, {})
-    return data.get(key, default) if isinstance(data, dict) else default
+    if not isinstance(data, dict):
+        return default
+    value = data.get(key, "")
+    # An explicitly empty value falls back to the default. Without this a key
+    # left blank in config.example.yaml, such as ref_dir, would emit an empty
+    # string and bowtie2 would silently search the current directory.
+    return value if value != "" else default
 
 def emit(name, value):
     print(f"{name}={shlex.quote(str(value))}")
@@ -195,6 +201,9 @@ bt2 = lambda k, d: get("bowtie2", k, d)
 emit("BOWTIE2_REF_DIR", bt2("ref_dir", os.path.join(project_dir, "DB", "sortmerna")))
 emit("BOWTIE2_INDEX", os.path.join(bt2("ref_dir", os.path.join(project_dir, "DB", "sortmerna")), bt2("index_prefix", "rrna_index")))
 emit("BOWTIE2_PRESET", bt2("preset", "very-sensitive"))
+emit("BOWTIE2_AUTO_FETCH", bt2("auto_fetch", "true"))
+emit("BOWTIE2_FETCH_URL", bt2("fetch_url", "https://github.com/Yu-Lab-Genomics/Hanta-Agent/releases/download/sortmerna-v1.0.0/rrna_index.tar.gz"))
+emit("BOWTIE2_FETCH_SHA256", bt2("fetch_sha256", ""))
 emit("BOWTIE2_EXTRA_ARGS", bt2("extra_args", ""))
 
 # --- MEGAHIT ---
@@ -365,6 +374,9 @@ PY
 # Called on failure: write an error JSON and exit
 fail_step() {
     local step="$1" code="$2" message="$3"
+    # Also report to stderr. The JSON below records the reason for tooling, but
+    # a person watching the terminal only sees this line.
+    printf '[%s] FAILED %s: %s\n' "$(date '+%F %T')" "${step}" "${message}" >&2
     write_json "failed" "${step}" "${message}" "${code}"
     exit "${code}"
 }
@@ -378,6 +390,127 @@ log_msg() {
 require_tool() {
     local tool="$1"
     command -v "${tool}" >/dev/null 2>&1 || fail_step "preflight" 127 "required tool not found: ${tool}"
+}
+
+# ---------------------------------------------------------------
+# rRNA index: fetch it on demand
+#   The six bowtie2 files total about 1.2 GB and are published as a release
+#   asset rather than tracked in git, so a fresh clone has none of them.
+#   Downloading here means the pipeline can start straight after cloning, with
+#   no manual preparation step.
+# ---------------------------------------------------------------
+RRNA_INDEX_FILES=(
+    rrna_index.1.bt2
+    rrna_index.2.bt2
+    rrna_index.3.bt2
+    rrna_index.4.bt2
+    rrna_index.rev.1.bt2
+    rrna_index.rev.2.bt2
+)
+
+# How many of the six files are absent under the configured directory
+rrna_index_missing_count() {
+    local f n=0
+    for f in "${RRNA_INDEX_FILES[@]}"; do
+        [ -s "${BOWTIE2_REF_DIR}/${f}" ] || n=$((n + 1))
+    done
+    printf '%s\n' "${n}"
+}
+
+# Printed by every failure path, so the wording cannot drift between them
+rrna_index_hint() {
+    printf '  Prepare the index by hand with:\n' >&2
+    printf '    bash skills/database-update-agent/scripts/fetch_rrna_index.sh --db-dir %s/DB\n' "${PROJECT_DIR}" >&2
+    printf '  Or set bowtie2.auto_fetch: true in the configuration.\n' >&2
+}
+
+fetch_rrna_index() {
+    local url="${BOWTIE2_FETCH_URL}"
+    local want_sha="${BOWTIE2_FETCH_SHA256:-}"
+    local dir="${BOWTIE2_REF_DIR}"
+    local name archive tmp f src got
+
+    name="$(basename "${url}")"
+    archive="${dir}/${name}"
+
+    mkdir -p "${dir}" || fail_step "preflight" 1 "cannot create the rRNA index directory: ${dir}"
+
+    printf '[%s] rRNA index incomplete under %s\n' "$(date '+%F %T')" "${dir}"
+    printf '[%s] downloading %s (about 1.2 GB, once only)\n' "$(date '+%F %T')" "${url}"
+    log_msg "rRNA index auto-fetch: ${url}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 --retry-delay 5 -o "${archive}.partial" "${url}" || {
+            rm -f "${archive}.partial"
+            rrna_index_hint
+            fail_step "preflight" 1 "rRNA index download failed: ${url}"
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget --tries=3 --waitretry=5 -O "${archive}.partial" "${url}" || {
+            rm -f "${archive}.partial"
+            rrna_index_hint
+            fail_step "preflight" 1 "rRNA index download failed: ${url}"
+        }
+    else
+        rrna_index_hint
+        fail_step "preflight" 1 "neither curl nor wget is available; cannot fetch the rRNA index"
+    fi
+    mv -f "${archive}.partial" "${archive}"
+
+    if [ -n "${want_sha}" ]; then
+        got="$(sha256sum "${archive}" | awk '{print $1}')"
+        if [ "${got}" != "${want_sha}" ]; then
+            printf '  archive kept at %s for inspection\n' "${archive}" >&2
+            fail_step "preflight" 1 "rRNA index checksum mismatch: expected ${want_sha}, got ${got}"
+        fi
+        printf '[%s] rRNA index checksum OK\n' "$(date '+%F %T')"
+    fi
+
+    tmp="$(mktemp -d "${dir}/.extract-XXXXXX")" \
+        || fail_step "preflight" 1 "cannot create a temporary directory under ${dir}"
+    if ! tar -xzf "${archive}" -C "${tmp}"; then
+        fail_step "preflight" 1 "rRNA index extraction failed; leftovers kept in ${tmp}"
+    fi
+
+    # Locate each file by name, so an archive that wraps everything in a
+    # directory behaves the same as one that does not.
+    for f in "${RRNA_INDEX_FILES[@]}"; do
+        src="$(find "${tmp}" -type f -name "${f}" -print -quit)"
+        if [ -z "${src}" ]; then
+            fail_step "preflight" 1 "rRNA index archive does not contain ${f}; extracted tree kept in ${tmp}"
+        fi
+        mv -f "${src}" "${dir}/${f}"
+    done
+    rm -rf "${tmp}"
+    rm -f "${archive}"
+
+    printf '[%s] rRNA index installed into %s\n' "$(date '+%F %T')" "${dir}"
+    log_msg "rRNA index installed into ${dir}"
+}
+
+ensure_rrna_index() {
+    local missing
+    missing="$(rrna_index_missing_count)"
+    [ "${missing}" -eq 0 ] && return 0
+
+    if [ "${DRY_RUN}" = "true" ]; then
+        printf '[dry-run] rRNA index incomplete: %s of %s files missing from %s\n' \
+            "${missing}" "${#RRNA_INDEX_FILES[@]}" "${BOWTIE2_REF_DIR}"
+        printf '[dry-run] would download %s and extract it there\n' "${BOWTIE2_FETCH_URL}"
+        return 0
+    fi
+
+    if [ "${BOWTIE2_AUTO_FETCH}" != "true" ]; then
+        printf '[%s] rRNA index incomplete: %s of %s files missing from %s\n' \
+            "$(date '+%F %T')" "${missing}" "${#RRNA_INDEX_FILES[@]}" "${BOWTIE2_REF_DIR}" >&2
+        rrna_index_hint
+        fail_step "preflight" 1 "rRNA index incomplete and bowtie2.auto_fetch is not true"
+    fi
+
+    fetch_rrna_index
+
+    [ "$(rrna_index_missing_count)" -eq 0 ] \
+        || fail_step "preflight" 1 "rRNA index still incomplete after fetching"
 }
 
 # Append extra arguments (split on whitespace)
@@ -520,6 +653,10 @@ if [ "${DRY_RUN}" != "true" ]; then
     command -v conda >/dev/null 2>&1 || fail_step "preflight" 127 "conda command not found"
     conda run -n "${CONDA_ENV}" true >/dev/null 2>&1 || fail_step "preflight" 127 "conda environment ${CONDA_ENV} is not usable"
 fi
+
+# The rRNA index is the only database component not tracked in git, so it is
+# fetched here on demand. Runs in dry-run mode too, where it only reports.
+ensure_rrna_index
 
 # ============================================================
 # Locate the input files

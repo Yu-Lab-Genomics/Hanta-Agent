@@ -66,12 +66,43 @@ suggested an alignment; the contents were raw nucleotides.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `cleaned library directory not found: <db>/clean` | The curated nucleotide library was never installed, or `project_dir` is wrong | Install `DB/clean/` with the three `*_clean.fasta` files |
-| `input missing: <db>/clean/vmr_L_clean.fasta` | The directory exists but a segment file does not | Supply all three segments, or accept that the library is incomplete |
-| `manifest.csv not found` | `install_manifest.py` has not run | Run it, or pass `--source` |
+| `manifest.csv not found` | The raw metadata table is absent | Restore it from the repository. It is a required input, not something this agent produces |
+| `nucleotide input missing for segment(s): L` | One of `diamond/vmr_{L,M,S}_99.fasta` is absent | Restore it from the repository. All three are needed before curation can run |
+| `cleaned library directory not found: <db>/clean` | `clean_db.py` has not run, or `project_dir` is wrong | Run `clean_db.py`. It needs `DB/manifest.csv` and `DB/diamond/vmr_{L,M,S}_99.fasta` in place |
+| `input missing: <db>/clean/vmr_L_clean.fasta` | `clean_db.py` ran but this segment produced nothing | Check the `vmr_L_clean.fasta: N sequences` line it printed; zero means no record of that segment survived curation |
 | `protein library vmr_l.fa not found` | `build_clean_db.py` has not run, or wrote elsewhere | Run it, then re-check `DB/diamond/` |
-| `source manifest not found` | `clean/manifest_clean.csv` is absent | Supply it with the cleaned library, or pass `--source` |
+| `source manifest not found` | `clean/manifest_clean.csv` is absent | Run `clean_db.py` first, or pass `--source` |
 | `source manifest is missing required column(s)` | The manifest is malformed | Columns `acc_base`, `species` and `segment` are mandatory |
+
+### clean_db.py keeps almost nothing
+
+If `kept records` is far below `input records`, read the `dropped ...` lines
+printed between them. Each names one rule and counts what it removed:
+
+| Line | What triggered it |
+|---|---|
+| `dropped placeholder species` | The species name ends in `sp.` or is a bare genus name |
+| `dropped vague name` | The name carries no place name and cannot be tied to a location |
+| `dropped neither complete nor long enough` | NCBI does not call the record complete, and it is under the segment floor (L 5,000 / M 3,000 / S 1,400 nt) |
+
+If the counts look wrong, the input manifest is probably not the one you expect.
+Check its row count against the 2,504 of the released database first.
+
+### clean_db.py wrote fewer sequences than manifest rows
+
+This is expected, not a bug. Curation writes a sequence only when its
+`acc_base` appears in the curated manifest, and `diamond/vmr_{L,M,S}_99.fasta`
+holds far more records than the manifest does:
+
+| Segment | In `vmr_<seg>_99.fasta` | In `manifest.csv` | Written to `clean/` |
+|---|---|---|---|
+| L | 1,895 | 570 | 570 |
+| M | 1,682 | 694 | 694 |
+| S | 2,438 | 1,240 | 1,240 |
+
+The nucleotide file is the CD-HIT pool; the manifest decides what the database
+contains. If a sequence you need is missing from `clean/`, add its record to the
+manifest rather than to the FASTA.
 
 ## Build failures
 
@@ -88,21 +119,26 @@ suggested an alignment; the contents were raw nucleotides.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `--check` reports files MISSING | Never downloaded, or downloaded elsewhere | Rerun without `--check`, with `--url` |
-| `checksum verification failed` | A truncated or corrupted download | Delete the named file and rerun; the downloader retries three times before giving up |
-| Download fails part way | Network interruption on a 1.2 GB transfer | Rerun; already-complete files are skipped |
+| `--check` reports files MISSING | Never downloaded, or downloaded elsewhere | Rerun without `--check`; `--url` defaults to the release archive |
+| `download failed: ... (partial data left at ...)` | Network interruption on a 1.2 GB transfer | Rerun. An archive already on disk is reused unless `--force` is given |
+| `archive checksum mismatch` | The archive is truncated, or the expected hash is stale | Delete `<db>/sortmerna/rrna_index.tar.gz` and rerun. If it keeps failing after a re-download, re-upload the asset and refresh `ARCHIVE_SHA256` |
+| `archive does not contain: ...` | The tarball is missing one or more `.bt2` files | Repack the archive. The extracted tree is kept under `.extract-*` so you can see what was actually inside |
+| `extraction failed` | Corrupt gzip stream, or a full disk | Check `df -h <db>/sortmerna`; the archive is left in place so it can be retested |
+| `no SHA256 configured for the archive` | `ARCHIVE_SHA256` ships empty | Not an error. Fill it in after uploading, or pass `--sha256` per run |
+| `checksum verification failed` (files mode) | A truncated or corrupted `.bt2` | Delete the named file and rerun; the downloader retries three times before giving up |
 | `index already installed and complete` when you wanted to re-fetch | The guard is doing its job | Add `--force` |
 | bowtie2 reports it cannot find the index | The prefix is right but the files are not | Confirm `ls <project_dir>/DB/sortmerna/rrna_index*.bt2` and that `project_dir` is correct |
 
 ## Verifying a database without running the pipeline
 
-All four scripts have a safe mode. Use them before committing to a long build:
+All five scripts have a safe mode. Use them before committing to a long build:
 
 ```bash
-python build_clean_db.py --dry-run      # composed prodigal and diamond commands
-python build_tree_ref.py --dry-run      # composed MAFFT command
-python install_manifest.py --check      # column validation, writes nothing
-bash fetch_rrna_index.sh --check        # index completeness, writes nothing
+python clean_db.py --dry-run           # curation counts, writes nothing
+python build_clean_db.py --dry-run     # composed prodigal and diamond commands
+python build_tree_ref.py --dry-run     # composed MAFFT command
+python install_manifest.py --check     # column validation, writes nothing
+bash fetch_rrna_index.sh --check       # index completeness, writes nothing
 ```
 
 Then read the printed paths. If they do not sit under the `DB/` that
@@ -113,10 +149,17 @@ Then read the printed paths. If they do not sit under the `DB/` that
 - **Never rebuild against a live results directory while an analysis is running.**
   The DIAMOND indexes are read by agent 2; replacing them mid-run mixes two
   database versions in one result set.
-- **Back up `DB/clean/` before rebuilding.** The Prodigal step overwrites
-  `*_proteins.faa` and `*_genes.ffn` in place.
-- **Treat a successful exit as the start of verification, not the end.** Both
-  Python scripts report success once the tools return 0; whether the outputs are
+- **`DB/clean/` is safe to delete; the two raw inputs are not.** `clean_db.py`
+  regenerates `clean/` from `DB/manifest.csv` and `diamond/vmr_{L,M,S}_99.fasta`
+  in seconds. Those two inputs come from NCBI and nothing here can recreate them.
+- **Back up `DB/clean/` before rerunning `build_clean_db.py`** if you care about
+  the previous Prodigal output: the step overwrites `*_proteins.faa` and
+  `*_genes.ffn` in place.
+- **Treat a successful exit as the start of verification, not the end.** Every
+  Python script reports success once the tools return 0; whether the outputs are
   correct requires the checks above.
-- **`fetch_rrna_index.sh` never deletes.** A failed download leaves a `.partial`
-  file, so an interrupted transfer is never mistaken for a complete index.
+- **`fetch_rrna_index.sh` never deletes on failure.** A failed download leaves a
+  `.partial` file and a failed extraction leaves `.extract-*`, so an interrupted
+  run is never mistaken for a complete index. A *successful* archive install does
+  delete the downloaded `.tar.gz` to reclaim about 1 GB; pass `--keep-archive` to
+  keep it.

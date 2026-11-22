@@ -37,10 +37,31 @@ Reading that file is the only reliable way to know what happened.
 | **Input** | `paths.data_dir/<SAMPLE>_1.fastq.gz` and `<SAMPLE>_2.fastq.gz` (suffixes configurable under `input:`) |
 | **Config** | `../config.yaml`, two directories above `scripts/` — the agent locates it automatically |
 | **Prerequisite environment** | conda env named by `conda_env` (default `lpy-hanta-v2`) containing fastp, prinseq++, bowtie2, megahit, prodigal |
-| **Prerequisite data** | bowtie2 rRNA index at `<project_dir>/DB/sortmerna/<index_prefix>` (default `rrna_index`) |
+| **Prerequisite data** | bowtie2 rRNA index at `<project_dir>/DB/sortmerna/<index_prefix>` (default `rrna_index`). Fetched automatically when missing — see below |
 | **Output** | Five stage directories under `paths.results_dir` plus `json/<SAMPLE>.qc.json` and `log/<SAMPLE>/` — see `references/outputs-and-contract.md` |
 | **Downstream interface** | `outputs.contigs_fasta` and `outputs.prodigal_min_aa_faa` inside the JSON |
 | **Failure behaviour** | Non-zero exit code, and a JSON with `status: failed` plus `failed_step` and `message` |
+
+## The rRNA index is fetched for you
+
+`DB/sortmerna/` is the one database component not tracked in git: six bowtie2
+files totalling about 1.2 GB, published as a release archive. Before the first
+sample is processed, preflight checks for all six and, when any is missing,
+downloads and extracts the archive itself. A fresh clone therefore runs with no
+preparation step at all.
+
+Three keys control this, all under `bowtie2:` in `config.yaml`:
+
+| Key | Shipped value | Meaning |
+|---|---|---|
+| `auto_fetch` | `true` | Download the index when it is missing. Set to `false` to be told what to run instead |
+| `fetch_url` | the release archive | Where to download from |
+| `fetch_sha256` | empty | Expected hash of the archive; empty skips the check |
+
+`--dry-run` reports what would be downloaded without touching the network.
+Downloading needs about 2.4 GB of free space at peak, because the archive and the
+extracted files coexist until extraction finishes; the archive is deleted
+afterwards.
 
 ## Workflow
 
